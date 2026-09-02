@@ -34,6 +34,10 @@
 - Fixed OpenAI Codex SSE parsing to process terminal events that are not followed by a blank line ([#9047](https://github.com/earendil-works/pi/issues/9047)).
 - Fixed `NO_PROXY` matching for both root domains and subdomains ([#8737](https://github.com/earendil-works/pi/pull/8737) by [@MeiSiristhebest](https://github.com/MeiSiristhebest)).
 
+### Added
+
+- Added optional model-local default thinking levels for safe provider-specific defaults.
+
 ## [0.84.4] - 2026-08-28
 
 ### Added

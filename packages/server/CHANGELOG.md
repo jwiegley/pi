@@ -4,6 +4,10 @@
 
 ## [0.85.0] - 2026-09-04
 
+### Added
+
+- Added cross-connection session lease enforcement and separate follow-up dispatch to session runtimes.
+
 ## [0.84.4] - 2026-08-28
 
 ## [0.84.3] - 2026-08-24

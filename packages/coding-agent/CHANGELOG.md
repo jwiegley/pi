@@ -54,6 +54,20 @@
 - Fixed proxied plain-HTTP provider requests hanging after a tool call by tunneling them with CONNECT ([#8134](https://github.com/earendil-works/pi/issues/8134)).
 - Fixed RPC `abort` reporting success without cancelling an in-progress manual compaction ([#8920](https://github.com/earendil-works/pi/issues/8920)).
 
+### Added
+
+- Added authenticated remote session discovery, exclusive ownership, correlated current-session task turns, and distinct steer/follow-up controls.
+- Added SQLite-backed bounded session history with paged navigation, streamed export, atomic migration, and lazy active transcripts.
+- Added provider-scoped request/idle timeouts, model-local default thinking levels, and extension-wide tool renderer wrappers.
+
+### Changed
+
+- Removed automatic startup model-catalog refresh and bundled Pi documentation paths from the default system prompt.
+
+### Fixed
+
+- Fixed deferred footer renders retaining a replaced session after its history store closes.
+
 ## [0.84.4] - 2026-08-28
 
 ### New Features
