@@ -1,4 +1,4 @@
-import { Agent } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	getModel,
@@ -148,8 +148,9 @@ describe("AgentSession.getSessionStats", () => {
 			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
 			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
 			sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			sessionManager.appendMessage(createUserMessage("third", 5));
-			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6));
+			const postCompactionTimestamp = Date.now() + 1000;
+			sessionManager.appendMessage(createUserMessage("third", postCompactionTimestamp));
+			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, postCompactionTimestamp + 1));
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
@@ -158,6 +159,27 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBe(25_000);
 			expect(stats.contextUsage?.percent).toBe((25_000 / model.contextWindow) * 100);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("retains post-compaction usage beyond 4096 later entries", async () => {
+		const { session, sessionManager } = await createSession();
+
+		try {
+			const keptUserId = sessionManager.appendMessage(createUserMessage("kept", 1));
+			sessionManager.appendCompaction("summary", keptUserId, 10_000);
+			const postCompactionTimestamp = Date.now() + 1000;
+			sessionManager.appendMessage(createAssistantMessage("post-compaction", 25_000, postCompactionTimestamp));
+			for (let index = 0; index < 5000; index++) {
+				sessionManager.appendMessage(createUserMessage(`later-${index}`, postCompactionTimestamp + index + 1));
+			}
+			syncAgentMessages(session, sessionManager);
+
+			const usage = session.getContextUsage();
+			expect(usage?.tokens).not.toBeNull();
+			expect(usage?.tokens ?? 0).toBeGreaterThan(25_000);
 		} finally {
 			session.dispose();
 		}
@@ -266,16 +288,98 @@ describe("AgentSession.getSessionStats", () => {
 			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
 			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
 			sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			sessionManager.appendMessage(createUserMessage("third", 5));
-			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6));
-			sessionManager.appendMessage(createUserMessage("continue", 7));
-			sessionManager.appendMessage(createAssistantMessage("partial", 0, 8));
+			const postCompactionTimestamp = Date.now() + 1000;
+			sessionManager.appendMessage(createUserMessage("third", postCompactionTimestamp));
+			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, postCompactionTimestamp + 1));
+			sessionManager.appendMessage(createUserMessage("continue", postCompactionTimestamp + 2));
+			sessionManager.appendMessage(createAssistantMessage("partial", 0, postCompactionTimestamp + 3));
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).not.toBeNull();
 			expect(stats.contextUsage?.tokens ?? 0).toBeGreaterThan(25_000);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("computes context usage from deferred history without materializing it", async () => {
+		const { session } = await createSession();
+		const messages: AgentMessage[] = [
+			createUserMessage("old", 1),
+			createAssistantMessage("response", 200, 2),
+			createUserMessage("later", 3),
+		];
+		let materializations = 0;
+		let reverseReads = 0;
+		session.agent.setMessageSource({
+			length: messages.length,
+			materialize: () => {
+				materializations++;
+				return messages.slice();
+			},
+			last: (role) =>
+				messages
+					.slice()
+					.reverse()
+					.find((message) => role === undefined || message.role === role),
+			iterateReverse: function* () {
+				for (let index = messages.length - 1; index >= 0; index--) {
+					reverseReads++;
+					yield messages[index];
+				}
+			},
+		});
+
+		try {
+			const usage = session.getContextUsage();
+			expect(usage?.tokens ?? 0).toBeGreaterThan(200);
+			expect(materializations).toBe(0);
+			expect(reverseReads).toBe(2);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("selects the last eligible assistant before extracting text", async () => {
+		const { session } = await createSession();
+		const older = createAssistantMessage("older text", 100, 1);
+		const toolOnly: AssistantMessage = {
+			...createAssistantMessage("", 200, 2),
+			content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }],
+		};
+		const aborted: AssistantMessage = {
+			...createAssistantMessage("", 0, 3),
+			content: [],
+			stopReason: "aborted",
+		};
+		const messages: AgentMessage[] = [older, toolOnly, aborted];
+		let materializations = 0;
+		let reverseReads = 0;
+		session.agent.setMessageSource({
+			length: messages.length,
+			materialize: () => {
+				materializations++;
+				return messages.slice();
+			},
+			last: (role) =>
+				messages
+					.slice()
+					.reverse()
+					.find((message) => role === undefined || message.role === role),
+			iterateReverse: function* () {
+				for (let index = messages.length - 1; index >= 0; index--) {
+					reverseReads++;
+					yield messages[index];
+				}
+			},
+		});
+
+		try {
+			expect(session.getLastAssistantText()).toBeUndefined();
+			expect(materializations).toBe(0);
+			expect(reverseReads).toBe(2);
 		} finally {
 			session.dispose();
 		}

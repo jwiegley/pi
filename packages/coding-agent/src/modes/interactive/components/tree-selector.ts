@@ -12,7 +12,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { SessionTreeNode } from "../../../core/session-manager.ts";
+import type { SessionEntry, SessionTreeNode } from "../../../core/session-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { formatKeyText, keyHint } from "./keybinding-hints.ts";
@@ -51,6 +51,41 @@ const MIN_VISIBLE_ANCHOR_CONTENT_WIDTH = 4;
 const MAX_VISIBLE_ANCHOR_CONTENT_WIDTH = 20;
 const MIN_ANCHOR_CONTEXT_WIDTH = 2;
 const MAX_ANCHOR_CONTEXT_WIDTH = 12;
+
+function extractFullContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	let result = "";
+	for (const block of content) {
+		if (typeof block === "object" && block !== null && "type" in block && block.type === "text") {
+			result += (block as { text: string }).text;
+		}
+	}
+	return result;
+}
+
+/** Extract the complete copyable text from a hydrated session entry. */
+export function getSessionEntryCopyText(entry: SessionEntry): string | undefined {
+	let text: string | undefined;
+	switch (entry.type) {
+		case "message":
+			if (entry.message.role === "bashExecution") {
+				text = entry.message.command;
+			} else if ("content" in entry.message) {
+				text = extractFullContent(entry.message.content);
+				if (!text && entry.message.role === "assistant") text = entry.message.errorMessage;
+			}
+			break;
+		case "custom_message":
+			text = extractFullContent(entry.content);
+			break;
+		case "compaction":
+		case "branch_summary":
+			text = entry.summary;
+			break;
+	}
+	return text?.trim() ? text : undefined;
+}
 
 /**
  * Render tree rows into a horizontally clipped viewport.
@@ -122,8 +157,9 @@ class TreeList implements Component {
 
 	public onSelect?: (entryId: string) => void;
 	public onCancel?: () => void;
-	public onCopy?: (text: string | undefined) => void;
+	public onCopy?: (entryId: string | undefined, text: string | undefined) => void;
 	public onLabelEdit?: (entryId: string, currentLabel: string | undefined) => void;
+	public onPageBoundary?: (boundary: "older" | "newer") => boolean;
 
 	constructor(
 		tree: SessionTreeNode[],
@@ -624,9 +660,29 @@ class TreeList implements Component {
 		return this.filteredNodes[this.selectedIndex]?.node;
 	}
 
+	replaceTree(tree: SessionTreeNode[], selectedId?: string, fallback: "first" | "last" = "last"): void {
+		this.foldedNodes.clear();
+		this.lastSelectedId = null;
+		this.selectedIndex = 0;
+		this.filteredNodes = [];
+		this.visibleParentMap.clear();
+		this.visibleChildrenMap.clear();
+		this.multipleRoots = tree.length > 1;
+		this.flatNodes = this.flattenTree(tree);
+		this.buildActivePath();
+		this.applyFilter();
+
+		const selectedIndex = selectedId
+			? this.filteredNodes.findIndex((flatNode) => flatNode.node.entry.id === selectedId)
+			: -1;
+		this.selectedIndex =
+			selectedIndex >= 0 ? selectedIndex : fallback === "first" ? 0 : Math.max(0, this.filteredNodes.length - 1);
+		this.lastSelectedId = this.filteredNodes[this.selectedIndex]?.node.entry.id ?? null;
+	}
+
 	copySelected(): void {
 		const node = this.getSelectedNode();
-		this.onCopy?.(node ? this.getEntryCopyText(node) : undefined);
+		this.onCopy?.(node?.entry.id, node ? this.getEntryCopyText(node) : undefined);
 	}
 
 	updateNodeLabel(entryId: string, label: string | undefined, labelTimestamp?: string): void {
@@ -881,45 +937,11 @@ class TreeList implements Component {
 	}
 
 	private extractFullContent(content: unknown): string {
-		if (typeof content === "string") return content;
-		if (!Array.isArray(content)) return "";
-
-		let result = "";
-		for (const block of content) {
-			if (typeof block === "object" && block !== null && "type" in block && block.type === "text") {
-				result += (block as { text: string }).text;
-			}
-		}
-		return result;
+		return extractFullContent(content);
 	}
 
 	private getEntryCopyText(node: SessionTreeNode): string | undefined {
-		const entry = node.entry;
-		let text: string | undefined;
-
-		switch (entry.type) {
-			case "message":
-				if (entry.message.role === "bashExecution") {
-					text = entry.message.command;
-				} else if ("content" in entry.message) {
-					text = this.extractFullContent(entry.message.content);
-					if (!text && entry.message.role === "assistant") {
-						text = entry.message.errorMessage;
-					}
-				}
-				break;
-			case "custom_message":
-				text = this.extractFullContent(entry.content);
-				break;
-			case "compaction":
-				text = entry.summary;
-				break;
-			case "branch_summary":
-				text = entry.summary;
-				break;
-		}
-
-		return text?.trim() ? text : undefined;
+		return getSessionEntryCopyText(node.entry);
 	}
 
 	private hasTextContent(content: unknown): boolean {
@@ -996,8 +1018,18 @@ class TreeList implements Component {
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up")) {
+			if (this.filteredNodes.length === 0) {
+				this.onPageBoundary?.("older");
+				return;
+			}
+			if (this.selectedIndex === 0 && this.onPageBoundary?.("older")) return;
 			this.selectedIndex = this.selectedIndex === 0 ? this.filteredNodes.length - 1 : this.selectedIndex - 1;
 		} else if (kb.matches(keyData, "tui.select.down")) {
+			if (this.filteredNodes.length === 0) {
+				this.onPageBoundary?.("newer");
+				return;
+			}
+			if (this.selectedIndex === this.filteredNodes.length - 1 && this.onPageBoundary?.("newer")) return;
 			this.selectedIndex = this.selectedIndex === this.filteredNodes.length - 1 ? 0 : this.selectedIndex + 1;
 		} else if (kb.matches(keyData, "app.tree.foldOrUp")) {
 			const currentId = this.filteredNodes[this.selectedIndex]?.node.entry.id;
@@ -1017,9 +1049,19 @@ class TreeList implements Component {
 			}
 		} else if (kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.select.pageUp")) {
 			// Page up
+			if (this.filteredNodes.length === 0) {
+				this.onPageBoundary?.("older");
+				return;
+			}
+			if (this.selectedIndex === 0 && this.onPageBoundary?.("older")) return;
 			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisibleLines);
 		} else if (kb.matches(keyData, "tui.editor.cursorRight") || kb.matches(keyData, "tui.select.pageDown")) {
 			// Page down
+			if (this.filteredNodes.length === 0) {
+				this.onPageBoundary?.("newer");
+				return;
+			}
+			if (this.selectedIndex === this.filteredNodes.length - 1 && this.onPageBoundary?.("newer")) return;
 			this.selectedIndex = Math.min(this.filteredNodes.length - 1, this.selectedIndex + this.maxVisibleLines);
 		} else if (kb.matches(keyData, "tui.select.confirm")) {
 			const selected = this.filteredNodes[this.selectedIndex];
@@ -1331,7 +1373,8 @@ export class TreeSelectorComponent extends Container implements Focusable {
 	private labelInputContainer: Container;
 	private treeContainer: Container;
 	private onLabelChangeCallback?: (entryId: string, label: string | undefined) => void;
-	public onCopy?: (text: string | undefined) => void;
+	public onCopy?: (entryId: string | undefined, text: string | undefined) => void;
+	public onPageBoundary?: (boundary: "older" | "newer") => boolean;
 
 	// Focusable implementation - propagate to labelInput when active for IME cursor positioning
 	private _focused = false;
@@ -1355,6 +1398,7 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		onLabelChange?: (entryId: string, label: string | undefined) => void,
 		initialSelectedId?: string,
 		initialFilterMode?: FilterMode,
+		truncationNotice?: string,
 	) {
 		super();
 
@@ -1364,8 +1408,9 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		this.treeList = new TreeList(tree, currentLeafId, maxVisibleLines, initialSelectedId, initialFilterMode);
 		this.treeList.onSelect = onSelect;
 		this.treeList.onCancel = onCancel;
-		this.treeList.onCopy = (text) => this.onCopy?.(text);
+		this.treeList.onCopy = (entryId, text) => this.onCopy?.(entryId, text);
 		this.treeList.onLabelEdit = (entryId, currentLabel) => this.showLabelInput(entryId, currentLabel);
+		this.treeList.onPageBoundary = (boundary) => this.onPageBoundary?.(boundary) ?? false;
 
 		this.treeContainer = new Container();
 		this.treeContainer.addChild(this.treeList);
@@ -1375,6 +1420,9 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 		this.addChild(new Text(theme.bold("  Session Tree"), 1, 0));
+		if (truncationNotice) {
+			this.addChild(new Text(theme.fg("warning", `  ${truncationNotice}`), 1, 0));
+		}
 		this.addChild(new TreeHelp());
 		this.addChild(new SearchLine(this.treeList));
 		this.addChild(new DynamicBorder());
@@ -1419,6 +1467,10 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		} else {
 			this.treeList.handleInput(keyData);
 		}
+	}
+
+	replaceTree(tree: SessionTreeNode[], selectedId?: string, fallback: "first" | "last" = "last"): void {
+		this.treeList.replaceTree(tree, selectedId, fallback);
 	}
 
 	getTreeList(): TreeList {

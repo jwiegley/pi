@@ -43,6 +43,7 @@ export type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcPageOptions,
 	RpcResponse,
 	RpcSessionState,
 } from "./rpc-types.ts";
@@ -459,7 +460,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					sessionId: session.sessionId,
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
-					messageCount: session.messages.length,
+					messageCount: session.messageCount,
 					pendingMessageCount: session.pendingMessageCount,
 				};
 				return success(id, "get_state", state);
@@ -631,12 +632,34 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "get_fork_messages": {
-				const messages = session.getUserMessagesForForking();
-				return success(id, "get_fork_messages", { messages });
+				return success(id, "get_fork_messages", { messages: session.getUserMessagesForForking() });
+			}
+
+			case "get_fork_messages_page": {
+				const page = await session.getUserMessagesForForkingPage({
+					afterOrdinal: command.afterOrdinal,
+					beforeOrdinal: command.beforeOrdinal,
+					direction: command.direction,
+					limit: command.limit,
+				});
+				return success(id, "get_fork_messages_page", page);
 			}
 
 			case "get_entries": {
 				const sessionManager = session.sessionManager;
+				if (command.afterOrdinal !== undefined || command.limit !== undefined) {
+					if (command.since !== undefined) {
+						return error(id, "get_entries", "since cannot be combined with paged entry options");
+					}
+					const page = sessionManager.getEntriesPage({
+						afterOrdinal: command.afterOrdinal,
+						limit: command.limit,
+					});
+					return success(id, "get_entries", {
+						...page,
+						leafId: sessionManager.getLeafId(),
+					});
+				}
 				let entries = sessionManager.getEntries();
 				if (command.since !== undefined) {
 					const sinceIndex = entries.findIndex((e) => e.id === command.since);
@@ -650,7 +673,21 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "get_tree": {
 				const sessionManager = session.sessionManager;
-				return success(id, "get_tree", { tree: sessionManager.getTree(), leafId: sessionManager.getLeafId() });
+				return success(id, "get_tree", {
+					tree: sessionManager.getTree(),
+					leafId: sessionManager.getLeafId(),
+				});
+			}
+
+			case "get_tree_page": {
+				const sessionManager = session.sessionManager;
+				const page = await sessionManager.getTreePage({
+					afterOrdinal: command.afterOrdinal,
+					beforeOrdinal: command.beforeOrdinal,
+					direction: command.direction,
+					limit: command.limit,
+				});
+				return success(id, "get_tree_page", { ...page, leafId: sessionManager.getLeafId() });
 			}
 
 			case "get_last_assistant_text": {
@@ -672,7 +709,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "get_messages": {
-				return success(id, "get_messages", { messages: session.messages });
+				return success(id, "get_messages", { messages: session.getMessagesSnapshot() });
 			}
 
 			// =================================================================

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, createAssistantMessageEventStream, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { getModel, streamSimple } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -289,13 +289,32 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now() + 1000,
 		};
 
-		// Put both messages into agent state so estimateContextTokens can find the successful one
-		session.agent.state.messages = [
+		const messages: AgentMessage[] = [
 			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
 			successfulAssistant,
 			{ role: "user", content: [{ type: "text", text: "another prompt" }], timestamp: Date.now() + 500 },
 			errorAssistant,
 		];
+		let materializations = 0;
+		let reverseReads = 0;
+		session.agent.setMessageSource({
+			length: messages.length,
+			materialize: () => {
+				materializations++;
+				return messages.slice();
+			},
+			last: (role) =>
+				messages
+					.slice()
+					.reverse()
+					.find((message) => role === undefined || message.role === role),
+			iterateReverse: function* () {
+				for (let index = messages.length - 1; index >= 0; index--) {
+					reverseReads++;
+					yield messages[index];
+				}
+			},
+		});
 
 		const runAutoCompactionSpy = vi
 			.spyOn(
@@ -315,6 +334,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await checkCompaction(errorAssistant);
 
 		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(materializations).toBe(0);
+		expect(reverseReads).toBe(3);
 	});
 
 	it("should not trigger threshold compaction for error messages when no prior usage exists", async () => {

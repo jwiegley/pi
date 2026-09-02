@@ -135,6 +135,7 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 ## Exporting and Sharing Sessions
 
 Use `/export [file]` to write a session to HTML.
+HTML export publishes atomically and refuses to replace an existing path; choose a new filename or remove the old export first.
 
 Use `/share` to upload a private GitHub gist with a shareable HTML link.
 

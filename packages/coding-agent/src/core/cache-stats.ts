@@ -47,6 +47,11 @@ interface PreviousRequest {
 	reportedCache: boolean;
 }
 
+export interface CacheWasteAccumulator {
+	add(entry: SessionEntry): void;
+	getTotals(): CacheWasteTotals;
+}
+
 /**
  * Compute the cache miss for one assistant message relative to the previous
  * request. Returns undefined when nothing is counted: first turn, after a
@@ -131,12 +136,39 @@ function scan(
 	return { prev, totals, misses };
 }
 
+/** Incremental cache-waste scan for streamed session history. */
+export function createCacheWasteAccumulator(models: ModelPriceSource): CacheWasteAccumulator {
+	let prev: PreviousRequest | undefined;
+	const totals: CacheWasteTotals = { missedTokens: 0, missedCost: 0, missCount: 0 };
+	return {
+		add(entry) {
+			if (entry.type === "compaction" || entry.type === "branch_summary") {
+				prev = undefined;
+				return;
+			}
+			if (entry.type !== "message" || entry.message.role !== "assistant") return;
+			const miss = detectMiss(prev, entry.message, models);
+			if (miss) {
+				totals.missedTokens += miss.missedTokens;
+				totals.missedCost += miss.missedCost;
+				totals.missCount++;
+			}
+			prev = asPreviousRequest(entry.message, prev?.reportedCache ?? false) ?? prev;
+		},
+		getTotals() {
+			return { ...totals };
+		},
+	};
+}
+
 /**
  * Cumulative cache waste across a session: prompt tokens that should have been
  * cache reads (they were in the previous turn's prompt) but were re-billed.
  */
 export function computeCacheWaste(entries: SessionEntry[], models: ModelPriceSource): CacheWasteTotals {
-	return scan(entries, models).totals;
+	const accumulator = createCacheWasteAccumulator(models);
+	for (const entry of entries) accumulator.add(entry);
+	return accumulator.getTotals();
 }
 
 /**

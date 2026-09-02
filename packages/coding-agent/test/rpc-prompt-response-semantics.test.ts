@@ -170,6 +170,7 @@ async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: 
 
 async function startRpcMode(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): Promise<{
 	lineHandler: (line: string) => void;
+	session: AgentSession;
 	cleanup: () => Promise<void>;
 }> {
 	rpcIo.outputLines = [];
@@ -179,7 +180,7 @@ async function startRpcMode(options: { withAuth: boolean; responseDelayMs: numbe
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
-	return { lineHandler: rpcIo.lineHandler!, cleanup };
+	return { lineHandler: rpcIo.lineHandler!, session: runtimeHost.session, cleanup };
 }
 
 describe("RPC prompt response semantics", () => {
@@ -279,6 +280,82 @@ describe("RPC prompt response semantics", () => {
 			});
 
 			await sleep(150);
+		} finally {
+			await cleanup();
+		}
+	});
+});
+
+describe("RPC paging compatibility", () => {
+	afterEach(() => {
+		rpcIo.outputLines = [];
+		rpcIo.lineHandler = undefined;
+	});
+
+	it("keeps legacy tree and fork payloads intact while page commands stay bounded", async () => {
+		const { lineHandler, session, cleanup } = await startRpcMode({ withAuth: false, responseDelayMs: 0 });
+		const longText = "é".repeat(2500);
+		const userId = session.sessionManager.appendMessage({ role: "user", content: longText, timestamp: 1 });
+		const customId = session.sessionManager.appendCustomEntry("rpc-test", { value: "complete payload" });
+
+		try {
+			lineHandler(JSON.stringify({ id: "legacy-fork", type: "get_fork_messages" }));
+			lineHandler(JSON.stringify({ id: "legacy-tree", type: "get_tree" }));
+			lineHandler(JSON.stringify({ id: "page-fork", type: "get_fork_messages_page", limit: 1 }));
+			lineHandler(JSON.stringify({ id: "page-tree", type: "get_tree_page", limit: 1 }));
+			lineHandler(JSON.stringify({ id: "invalid-page", type: "get_tree_page", direction: "sideways" }));
+
+			await vi.waitFor(() => {
+				const records = parseOutputLines(rpcIo.outputLines);
+				for (const id of ["legacy-fork", "legacy-tree", "page-fork", "page-tree", "invalid-page"]) {
+					expect(records.some((record) => record.id === id && record.type === "response")).toBe(true);
+				}
+			});
+
+			const records = parseOutputLines(rpcIo.outputLines);
+			const response = (id: string) => records.find((record) => record.id === id)!;
+			expect(response("legacy-fork")).toMatchObject({
+				command: "get_fork_messages",
+				success: true,
+				data: { messages: [{ entryId: userId, text: longText }] },
+			});
+			expect(response("legacy-tree")).toMatchObject({
+				command: "get_tree",
+				success: true,
+				data: {
+					leafId: customId,
+					tree: [
+						{
+							entry: { id: userId, message: { content: longText } },
+							children: [{ entry: { id: customId, data: { value: "complete payload" } } }],
+						},
+					],
+				},
+			});
+			const forkPage = response("page-fork");
+			expect(forkPage).toMatchObject({
+				command: "get_fork_messages_page",
+				success: true,
+				data: { messages: [{ entryId: userId, textTruncated: true }], nextOrdinal: null },
+			});
+			const forkPreview = (forkPage.data as { messages: Array<{ text: string }> }).messages[0]!.text;
+			expect(Buffer.byteLength(forkPreview)).toBe(4096);
+			const treePage = response("page-tree");
+			expect(treePage).toMatchObject({
+				command: "get_tree_page",
+				success: true,
+				data: {
+					entries: [{ ordinal: 0, id: userId, type: "message", messageRole: "user" }],
+					nextOrdinal: 0,
+					leafId: customId,
+				},
+			});
+			expect((treePage.data as { entries: unknown[] }).entries[0]).not.toHaveProperty("entry");
+			expect(response("invalid-page")).toMatchObject({
+				command: "get_tree_page",
+				success: false,
+				error: 'direction must be "forward" or "reverse"',
+			});
 		} finally {
 			await cleanup();
 		}

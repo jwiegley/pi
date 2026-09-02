@@ -63,6 +63,18 @@ function createSession(options: {
 		});
 	}
 
+	const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	for (const usageEntry of [options.usage, options.branchUsage, options.compactionUsage, options.toolUsage]) {
+		if (!usageEntry) continue;
+		usageTotals.input += usageEntry.input;
+		usageTotals.output += usageEntry.output;
+		usageTotals.cacheRead += usageEntry.cacheRead;
+		usageTotals.cacheWrite += usageEntry.cacheWrite;
+		usageTotals.cost += usageEntry.cost.total;
+	}
+	const promptTokens = usage ? usage.input + usage.cacheRead + usage.cacheWrite : 0;
+	const latestCacheHitRate = usage && promptTokens > 0 ? (usage.cacheRead / promptTokens) * 100 : undefined;
+
 	const session = {
 		state: {
 			model: {
@@ -75,6 +87,7 @@ function createSession(options: {
 		},
 		sessionManager: {
 			getEntries: () => entries,
+			getHistorySummary: () => ({ usage: usageTotals, latestCacheHitRate }),
 			getSessionName: () => options.sessionName,
 			getCwd: () => "/tmp/project",
 		},

@@ -200,6 +200,8 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
 
+HTML exports are published without clobbering: the destination must not already exist.
+
 ### Keyboard Shortcuts
 
 See `/hotkeys` for the full list. Customize via `~/.pi/agent/keybindings.json`. See [docs/keybindings.md](docs/keybindings.md).

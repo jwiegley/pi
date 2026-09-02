@@ -607,6 +607,8 @@ With custom path:
 {"type": "export_html", "outputPath": "/tmp/session.html"}
 ```
 
+The output path must not already exist. HTML export publishes without clobbering files, links, or concurrent writers.
+
 Response:
 ```json
 {
@@ -693,7 +695,9 @@ If an extension cancelled the clone:
 
 #### get_fork_messages
 
-Get user messages available for forking.
+Return every user message available for forking, including its complete text. This legacy command is
+retained for protocol compatibility and accepts no paging options; a large session may therefore
+produce a large response. New clients use `get_fork_messages_page`.
 
 ```json
 {"type": "get_fork_messages"}
@@ -707,19 +711,58 @@ Response:
   "success": true,
   "data": {
     "messages": [
-      {"entryId": "abc123", "text": "First prompt..."},
-      {"entryId": "def456", "text": "Second prompt..."}
+      {"entryId": "abc123", "text": "The complete first prompt..."},
+      {"entryId": "def456", "text": "The complete second prompt..."}
     ]
   }
 }
 ```
 
-#### get_entries
+#### get_fork_messages_page
 
-Get all session entries in append order (excluding the session header). The session is an append-only tree of entries with stable ids, so an entry id works as a durable cursor: pass the last entry id you have seen as `since` to get only entries strictly after it, even across client restarts. Unlike `get_messages`, this includes pre-compaction history and abandoned branches.
+Return one bounded page of user-message previews available for forking. The default direction is
+`forward`; set `direction` to `reverse` to open at the newest choices. `limit` defaults to 256 and is
+capped at 4096.
 
 ```json
-{"type": "get_entries"}
+{"type": "get_fork_messages_page", "direction": "reverse", "limit": 128}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "get_fork_messages_page",
+  "success": true,
+  "data": {
+    "messages": [
+      {"entryId": "abc123", "text": "First prompt..."},
+      {"entryId": "def456", "text": "Second prompt...", "textTruncated": true}
+    ],
+    "nextOrdinal": 42
+  }
+}
+```
+
+Message text is a display preview capped at 4 KiB. `textTruncated` is present when the complete user
+message is longer. The selected entry is still forked from its complete persisted payload.
+
+`afterOrdinal` and `beforeOrdinal` are exclusive cursors and cannot be combined. Forward requests use
+`afterOrdinal`; reverse requests use `beforeOrdinal`. Pages are chronological within each page in both
+directions. Feed `nextOrdinal` back using the matching cursor (`afterOrdinal` for forward,
+`beforeOrdinal` for reverse). `nextOrdinal` is `null` when no matching records remain. Ordinal cursors
+are non-negative safe integers; `limit` is a positive safe integer; and `direction` is either `forward`
+or `reverse`. Invalid combinations and values produce an error response.
+
+#### get_entries
+
+Get session entries in append order (excluding the session header). For normal reads, use the bounded
+ordinal page form. The legacy no-option and `since` forms can materialize the remaining complete
+history and are retained only for compatibility. Unlike `get_messages`, this includes pre-compaction
+history and abandoned branches.
+
+```json
+{"type": "get_entries", "afterOrdinal": 127, "limit": 256}
 ```
 
 With a cursor:
@@ -737,16 +780,22 @@ Response:
     "entries": [
       {"type": "message", "id": "def456", "parentId": "abc123", "timestamp": "...", "message": {"role": "user", "...": "..."}}
     ],
+    "nextOrdinal": 383,
     "leafId": "def456"
   }
 }
 ```
 
-`leafId` is the id of the current leaf entry (`null` for an empty session), so a client can tell in one round trip whether the active branch moved. If `since` does not match any entry id, the response is `success: false`.
+`nextOrdinal`, when present, is the exclusive `afterOrdinal` cursor for the next bounded page. `leafId`
+is the id of the current leaf entry (`null` for an empty session), so a client can tell in one round
+trip whether the active branch moved. If `since` does not match any entry id, the response is
+`success: false`.
 
 #### get_tree
 
-Get the session as a tree of entries. Each node is `{entry, children, label?, labelTimestamp?}`. A well-formed session has a single root; orphaned entries (broken parent chain) also appear as roots.
+Return the complete recursive session tree, including entry payloads. This legacy command is retained
+for protocol compatibility and accepts no paging options; its cost grows with the complete session.
+New clients use `get_tree_page`.
 
 ```json
 {"type": "get_tree"}
@@ -761,16 +810,62 @@ Response:
   "data": {
     "tree": [
       {
-        "entry": {"type": "message", "id": "abc123", "parentId": null, "...": "..."},
-        "children": [
-          {"entry": {"type": "message", "id": "def456", "parentId": "abc123", "...": "..."}, "children": []}
-        ]
+        "entry": {
+          "type": "message",
+          "id": "abc123",
+          "parentId": null,
+          "timestamp": "...",
+          "message": {"role": "user", "content": "The complete prompt..."}
+        },
+        "children": [],
+        "label": "checkpoint",
+        "labelTimestamp": "..."
       }
     ],
     "leafId": "def456"
   }
 }
 ```
+
+#### get_tree_page
+
+Return one bounded flat page of session-tree metadata. This command does not return the recursive
+tree or entry payloads. Reconstruct edges with `id` and `parentId`; a parent may lie outside the
+current page. Use `get_entries` or another targeted API when a payload is required.
+
+```json
+{"type": "get_tree_page", "direction": "reverse", "limit": 128}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "get_tree_page",
+  "success": true,
+  "data": {
+    "entries": [
+      {
+        "ordinal": 41,
+        "messageOrdinal": 20,
+        "id": "abc123",
+        "parentId": null,
+        "type": "message",
+        "messageRole": "user",
+        "timestamp": "...",
+        "label": "checkpoint",
+        "labelTimestamp": "..."
+      }
+    ],
+    "nextOrdinal": 41,
+    "leafId": "def456"
+  }
+}
+```
+
+Paging options and ordering match `get_fork_messages_page`: forward uses the exclusive `afterOrdinal`,
+reverse uses the exclusive `beforeOrdinal`, and `nextOrdinal` is `null` at the end. `leafId` always
+describes the session's current leaf and may refer to an entry outside the returned page.
 
 #### get_last_assistant_text
 
@@ -1553,7 +1648,7 @@ for event in read_events():
         delta = event.get("assistantMessageEvent", {})
         if delta.get("type") == "text_delta":
             print(delta["delta"], end="", flush=True)
-    
+
     if event.get("type") == "agent_end":
         print()
         break

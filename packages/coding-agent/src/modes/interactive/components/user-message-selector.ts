@@ -5,6 +5,7 @@ import { DynamicBorder } from "./dynamic-border.ts";
 interface UserMessageItem {
 	id: string; // Entry ID in the session
 	text: string; // The message text
+	textTruncated?: boolean;
 	timestamp?: string; // Optional timestamp if available
 }
 
@@ -51,7 +52,7 @@ class UserMessageList implements Component {
 			const isSelected = i === this.selectedIndex;
 
 			// Normalize message to single line
-			const normalizedMessage = message.text.replace(/\n/g, " ").trim();
+			const normalizedMessage = `${message.text.replace(/\n/g, " ").trim()}${message.textTruncated ? " … [preview truncated]" : ""}`;
 
 			// First line: cursor + message
 			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
@@ -115,6 +116,7 @@ export class UserMessageSelectorComponent extends Container {
 		onSelect: (entryId: string) => void,
 		onCancel: () => void,
 		initialSelectedId?: string,
+		truncationNotice?: string,
 	) {
 		super();
 
@@ -128,6 +130,9 @@ export class UserMessageSelectorComponent extends Container {
 				0,
 			),
 		);
+		if (truncationNotice) {
+			this.addChild(new Text(theme.fg("warning", truncationNotice), 1, 0));
+		}
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));

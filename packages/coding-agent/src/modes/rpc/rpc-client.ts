@@ -7,13 +7,13 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { SessionStats } from "../../core/agent-session.ts";
+import type { ForkMessageChoice, SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
-import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
+import type { SessionEntry, SessionTreeNode, SessionTreePageEntry } from "../../core/session-manager.ts";
 import type { JsonAgentSessionEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
-import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
+import type { RpcCommand, RpcPageOptions, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
 
 // ============================================================================
 // Types
@@ -398,8 +398,17 @@ export class RpcClient {
 		return this.getData(response);
 	}
 
+	/** Get one bounded page of user-message previews available for forking. */
+	async getForkMessagesPage(
+		options: RpcPageOptions = {},
+	): Promise<{ messages: ForkMessageChoice[]; nextOrdinal: number | null }> {
+		const response = await this.send({ ...options, type: "get_fork_messages_page" });
+		return this.getData<{ messages: ForkMessageChoice[]; nextOrdinal: number | null }>(response);
+	}
+
 	/**
-	 * Get messages available for forking.
+	 * @deprecated Expensive compatibility API: returns every fork message with its complete text.
+	 * Use getForkMessagesPage() for bounded reads.
 	 */
 	async getForkMessages(): Promise<Array<{ entryId: string; text: string }>> {
 		const response = await this.send({ type: "get_fork_messages" });
@@ -414,8 +423,30 @@ export class RpcClient {
 		return this.getData<{ entries: SessionEntry[]; leafId: string | null }>(response);
 	}
 
+	/** Get one bounded append-order page of session entries. */
+	async getEntriesPage(
+		afterOrdinal?: number,
+		limit = 256,
+	): Promise<{ entries: SessionEntry[]; leafId: string | null; nextOrdinal?: number }> {
+		const response = await this.send({ type: "get_entries", afterOrdinal, limit });
+		return this.getData<{ entries: SessionEntry[]; leafId: string | null; nextOrdinal?: number }>(response);
+	}
+
+	/** Get one bounded flat page of session-tree metadata. */
+	async getTreePage(
+		options: RpcPageOptions = {},
+	): Promise<{ entries: SessionTreePageEntry[]; leafId: string | null; nextOrdinal: number | null }> {
+		const response = await this.send({ ...options, type: "get_tree_page" });
+		return this.getData<{
+			entries: SessionTreePageEntry[];
+			leafId: string | null;
+			nextOrdinal: number | null;
+		}>(response);
+	}
+
 	/**
-	 * Get the session entry tree.
+	 * @deprecated Expensive compatibility API: materializes and constructs the complete tree.
+	 * Use getTreePage() for bounded metadata reads.
 	 */
 	async getTree(): Promise<{ tree: SessionTreeNode[]; leafId: string | null }> {
 		const response = await this.send({ type: "get_tree" });

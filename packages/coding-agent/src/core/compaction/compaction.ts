@@ -187,6 +187,10 @@ export interface ContextUsageEstimate {
 	lastUsageIndex: number | null;
 }
 
+export interface ReverseContextUsageEstimate extends ContextUsageEstimate {
+	lastUsageMessage: AssistantMessage | null;
+}
+
 function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const usage = getAssistantUsage(messages[i]);
@@ -226,6 +230,41 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 		usageTokens,
 		trailingTokens,
 		lastUsageIndex: usageInfo.index,
+	};
+}
+
+/**
+ * Estimate context tokens from a newest-first stream. Stops once the latest
+ * valid assistant usage is found, so deferred history remains unmaterialized.
+ */
+export function estimateContextTokensReverse(
+	messages: Iterable<AgentMessage>,
+	messageCount: number,
+): ReverseContextUsageEstimate {
+	let trailingTokens = 0;
+	let visited = 0;
+	for (const message of messages) {
+		visited++;
+		const usage = getAssistantUsage(message);
+		if (usage) {
+			const usageTokens = calculateContextTokens(usage);
+			return {
+				tokens: usageTokens + trailingTokens,
+				usageTokens,
+				trailingTokens,
+				lastUsageIndex: messageCount - visited,
+				lastUsageMessage: message as AssistantMessage,
+			};
+		}
+		trailingTokens += estimateTokens(message);
+	}
+
+	return {
+		tokens: trailingTokens,
+		usageTokens: 0,
+		trailingTokens,
+		lastUsageIndex: null,
+		lastUsageMessage: null,
 	};
 }
 

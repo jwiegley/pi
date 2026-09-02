@@ -839,13 +839,19 @@ const sm = SessionManager.open("/path/to/session.jsonl");
 const currentProjectSessions = await SessionManager.list(process.cwd());
 const allSessions = await SessionManager.listAll(process.cwd());
 
-// Tree traversal
-const entries = sm.getEntries();        // All entries (excludes header)
-const tree = sm.getTree();              // Full tree structure
-const path = sm.getPath();              // Path from root to current leaf
+// Bounded history/tree reads
+const entryPage = sm.getEntriesPage({ limit: 256 });
+const treePage = await sm.getTreePage({ direction: "reverse", limit: 128 });
+// treePage.entries are flat metadata records in chronological order.
+// Feed treePage.nextOrdinal back as beforeOrdinal to request the next older page.
+
 const leaf = sm.getLeafEntry();         // Current leaf entry
-const entry = sm.getEntry(id);          // Get entry by ID
+const entry = sm.getEntry(id);          // Hydrate one entry by ID
 const children = sm.getChildren(id);    // Direct children of entry
+
+// Deprecated compatibility APIs. These materialize complete history and can be expensive.
+const entries = sm.getEntries();
+const tree = sm.getTree();
 
 // Labels
 const label = sm.getLabel(id);          // Get label for entry
