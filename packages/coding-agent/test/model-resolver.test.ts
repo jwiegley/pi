@@ -13,7 +13,9 @@ import {
 	findInitialModel,
 	parseModelPattern,
 	resolveCliModel,
+	resolveExactModelScopeFromModels,
 	resolveModelScope,
+	resolveModelScopeFromModels,
 	resolveModelScopeWithDiagnostics,
 } from "../src/core/model-resolver.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -315,6 +317,62 @@ describe("resolveModelScopeWithDiagnostics", () => {
 		expect(result.scopedModels.map((scoped) => scoped.model.id)).toEqual(["bracketed-model[1m]"]);
 		expect(result.scopedModels[0].thinkingLevel).toBe("high");
 		expect(result.diagnostics).toEqual([]);
+	});
+});
+
+describe("resolveExactModelScopeFromModels", () => {
+	const providers = [
+		"openai-codex",
+		"anthropic",
+		"google",
+		"xai",
+		"factory",
+		"openrouter",
+		"omlx-clio",
+		"omlx-hera",
+		"llama-swap",
+	];
+	const providerModels: Model<"anthropic-messages">[] = providers.flatMap((provider) => [
+		{ ...mockModels[0], provider, id: "selected", name: "Shared display name" },
+		{ ...mockModels[0], provider, id: "unselected", name: "Shared display name" },
+	]);
+
+	test("selects exact provider/model identities across every configured provider class", () => {
+		const references = providers.map((provider) => `${provider}/selected`);
+		const result = resolveExactModelScopeFromModels(references, providerModels);
+
+		expect(result.scopedModels.map(({ model }) => `${model.provider}/${model.id}`)).toEqual(references);
+		expect(result.diagnostics).toEqual([]);
+	});
+
+	test("does not expand provider globs, fuzzy ids, or same-named models", () => {
+		const result = resolveExactModelScopeFromModels(["factory/*", "selected", "openrouter/selected"], providerModels);
+		expect(resolveModelScopeFromModels(["factory/*"], providerModels).scopedModels).toHaveLength(2);
+
+		expect(result.scopedModels.map(({ model }) => `${model.provider}/${model.id}`)).toEqual(["openrouter/selected"]);
+		expect(result.diagnostics.map(({ pattern }) => pattern)).toEqual(["factory/*", "selected"]);
+	});
+
+	test("keeps new models hidden and reports stale exact references", () => {
+		const result = resolveExactModelScopeFromModels(
+			["factory/selected", "factory/removed"],
+			[...providerModels, { ...mockModels[0], provider: "factory", id: "new" }],
+		);
+
+		expect(result.scopedModels.map(({ model }) => `${model.provider}/${model.id}`)).toEqual(["factory/selected"]);
+		expect(result.diagnostics.map(({ pattern }) => pattern)).toEqual(["factory/removed"]);
+	});
+
+	test("preserves thinking suffixes without misreading model-id colons", () => {
+		const result = resolveExactModelScopeFromModels(
+			["anthropic/selected:high", "openrouter/qwen/qwen3-coder:exacto"],
+			[...providerModels, ...mockOpenRouterModels],
+		);
+
+		expect(result.scopedModels.map(({ model, thinkingLevel }) => [model.provider, model.id, thinkingLevel])).toEqual([
+			["anthropic", "selected", "high"],
+			["openrouter", "qwen/qwen3-coder:exacto", undefined],
+		]);
 	});
 });
 
@@ -787,6 +845,19 @@ describe("default model selection", () => {
 		expect(result.model?.id).toBe("anthropic/claude-opus-4-6");
 	});
 
+	test("findInitialModel does not fall back when an explicit scope is empty", async () => {
+		const registry = {
+			getAvailableSnapshot: () => allModels,
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRuntime"];
+		const result = await findInitialModel({
+			scopedModels: [],
+			modelScopeConfigured: true,
+			isContinuing: false,
+			modelRuntime: registry,
+		});
+		expect(result.model).toBeUndefined();
+	});
+
 	test("findInitialModel ignores an unauthenticated saved default", async () => {
 		const savedDeepSeekModel: Model<"anthropic-messages"> = {
 			id: "deepseek-v4-flash",
@@ -870,7 +941,7 @@ describe("default model selection", () => {
 			return { session, settingsManager };
 		}
 
-		test("adds a persisted default to an existing scoped model list", async () => {
+		test("does not add a persisted default to an explicit scoped model list", async () => {
 			const { session, settingsManager } = await createSession({
 				scoped: true,
 				persistedScope: [`${sonnet.provider}/${sonnet.id}`],
@@ -882,12 +953,8 @@ describe("default model selection", () => {
 			expect(settingsManager.getDefaultModel()).toBe(opus.id);
 			expect(session.scopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`)).toEqual([
 				`${sonnet.provider}/${sonnet.id}`,
-				`${opus.provider}/${opus.id}`,
 			]);
-			expect(settingsManager.getEnabledModels()).toEqual([
-				`${sonnet.provider}/${sonnet.id}`,
-				`${opus.provider}/${opus.id}`,
-			]);
+			expect(settingsManager.getEnabledModels()).toEqual([`${sonnet.provider}/${sonnet.id}`]);
 		});
 
 		test("does not create a scoped model list when all models are available", async () => {

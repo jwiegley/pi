@@ -100,6 +100,7 @@ import {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
+import { resolveExactModelScopeFromModels } from "./model-resolver.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
@@ -208,8 +209,12 @@ export interface AgentSessionConfig {
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 	cwd: string;
-	/** Models to cycle through with Ctrl+P (from --models flag) */
+	/** Models to cycle through. Undefined disables scoping; an empty array is an explicit empty scope. */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/** Persisted exact identities used to re-resolve availability changes. */
+	scopedModelReferences?: string[];
+	/** Origin of the configured scope. */
+	modelScopeSource?: "cli" | "settings";
 	/** Resource loader for extensions, skills, prompts, themes, context files, and system prompt */
 	resourceLoader: ResourceLoader;
 	/** SDK custom tools registered outside extensions */
@@ -331,7 +336,9 @@ export class AgentSession {
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
 
-	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }> | undefined;
+	private _scopedModelReferences: string[] | undefined;
+	private _modelScopeSource: "cli" | "settings" | undefined;
 
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
@@ -407,7 +414,9 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
-		this._scopedModels = config.scopedModels ?? [];
+		this._scopedModels = config.scopedModels;
+		this._scopedModelReferences = config.scopedModelReferences ? [...config.scopedModelReferences] : undefined;
+		this._modelScopeSource = config.modelScopeSource;
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
@@ -1054,21 +1063,57 @@ export class AgentSession {
 		return this.sessionManager.getSessionName();
 	}
 
-	/** Scoped models for cycling (from --models flag) */
+	/** Models in the configured scope. */
 	get scopedModels(): ReadonlyArray<{ model: Model<any>; thinkingLevel?: ThinkingLevel }> {
-		return this._scopedModels;
+		const availableModels = this._modelRuntime.getAvailableSnapshot();
+		if (this._scopedModelReferences !== undefined) {
+			return resolveExactModelScopeFromModels(this._scopedModelReferences, availableModels).scopedModels;
+		}
+		const available = new Map(availableModels.map((model) => [`${model.provider}\0${model.id}`, model] as const));
+		return (this._scopedModels ?? []).flatMap((scoped) => {
+			const model = available.get(`${scoped.model.provider}\0${scoped.model.id}`);
+			return model ? [{ ...scoped, model }] : [];
+		});
 	}
 
-	/** Update scoped models for cycling */
-	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
+	/** Exact identities behind the current scope, when applicable. */
+	get scopedModelReferences(): readonly string[] | undefined {
+		return this._scopedModelReferences ? [...this._scopedModelReferences] : undefined;
+	}
+
+	/** Origin of the current scope. */
+	get modelScopeSource(): "cli" | "settings" | undefined {
+		return this._modelScopeSource;
+	}
+
+	/** Whether model scoping is configured, including an explicitly empty scope. */
+	get hasModelScope(): boolean {
+		return this._scopedModels !== undefined || this._scopedModelReferences !== undefined;
+	}
+
+	/** Update the model scope. Undefined disables scoping. */
+	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }> | undefined): void {
 		this._scopedModels = scopedModels;
+		this._scopedModelReferences = scopedModels?.map(
+			({ model, thinkingLevel }) => `${model.provider}/${model.id}${thinkingLevel ? `:${thinkingLevel}` : ""}`,
+		);
+		this._modelScopeSource = undefined;
+	}
+
+	/** Update the exact identities behind the model scope. */
+	setScopedModelReferences(references: string[] | undefined): void {
+		this._scopedModelReferences = references ? [...references] : undefined;
+	}
+
+	/** Update the origin of the current scope. */
+	setModelScopeSource(source: "cli" | "settings" | undefined): void {
+		this._modelScopeSource = source;
 	}
 
 	/** File-based prompt templates */
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
 		return this._resourceLoader.getPrompts().prompts;
 	}
-
 	private _normalizePromptSnippet(text: string | undefined): string | undefined {
 		if (!text) return undefined;
 		const oneLine = text
@@ -1740,7 +1785,6 @@ export class AgentSession {
 		this.sessionManager.appendModelChange(model.provider, model.id);
 		if (options.persist) {
 			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
-			this._addPersistedDefaultToNonEmptyScope(model);
 		}
 
 		// Apply thinking level for the new model.
@@ -1749,20 +1793,6 @@ export class AgentSession {
 		this.setThinkingLevel(thinkingLevel);
 
 		await this._emitModelSelect(model, previousModel, "set");
-	}
-
-	private _addPersistedDefaultToNonEmptyScope(model: Model<any>): void {
-		if (this._scopedModels.length === 0) return;
-		if (this._scopedModels.some((scoped) => modelsAreEqual(scoped.model, model))) return;
-
-		this._scopedModels = [...this._scopedModels, { model }];
-
-		const enabledModels = this.settingsManager.getEnabledModels();
-		if (!enabledModels?.length) return;
-
-		const modelReference = `${model.provider}/${model.id}`;
-		if (enabledModels.some((pattern) => pattern.toLowerCase() === modelReference.toLowerCase())) return;
-		this.settingsManager.setEnabledModels([...enabledModels, modelReference]);
 	}
 
 	/**
@@ -1775,7 +1805,7 @@ export class AgentSession {
 		direction: "forward" | "backward" = "forward",
 		options: ModelMutationOptions = {},
 	): Promise<ModelCycleResult | undefined> {
-		if (this._scopedModels.length > 0) {
+		if (this.hasModelScope) {
 			return this._cycleScopedModel(direction, options);
 		}
 		return this._cycleAvailableModel(direction, options);
@@ -1785,12 +1815,7 @@ export class AgentSession {
 		direction: "forward" | "backward",
 		options: ModelMutationOptions,
 	): Promise<ModelCycleResult | undefined> {
-		const availableIds = new Set(
-			this._modelRuntime.getAvailableSnapshot().map((model) => `${model.provider}\0${model.id}`),
-		);
-		const scopedModels = this._scopedModels.filter((scoped) =>
-			availableIds.has(`${scoped.model.provider}\0${scoped.model.id}`),
-		);
+		const scopedModels = this.scopedModels;
 		if (scopedModels.length <= 1) return undefined;
 
 		const currentModel = this.model;
@@ -1807,7 +1832,6 @@ export class AgentSession {
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		if (options.persist) {
 			this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
-			this._addPersistedDefaultToNonEmptyScope(next.model);
 		}
 
 		// Apply thinking level for the new model.
@@ -1842,7 +1866,6 @@ export class AgentSession {
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		if (options.persist) {
 			this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
-			this._addPersistedDefaultToNonEmptyScope(nextModel);
 		}
 
 		// Apply thinking level for the new model.
@@ -2692,7 +2715,7 @@ export class AgentSession {
 			},
 			{
 				getModel: () => this.model,
-				getScopedModels: () => this._scopedModels,
+				getScopedModels: () => this.scopedModels,
 				isIdle: () => this.isIdle,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
 				getSignal: () => this.agent.signal,

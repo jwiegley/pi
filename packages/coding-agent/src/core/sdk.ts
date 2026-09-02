@@ -8,7 +8,7 @@ import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
-import { findInitialModel } from "./model-resolver.ts";
+import { findInitialModel, resolveExactModelScopeFromModels } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
@@ -49,8 +49,12 @@ export interface CreateAgentSessionOptions {
 	model?: Model<any>;
 	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
 	thinkingLevel?: ThinkingLevel;
-	/** Models available for cycling (Ctrl+P in interactive mode) */
+	/** Models available for cycling. Undefined disables scoping; an empty array is an explicit empty scope. */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/** Exact identities used to re-resolve models after catalogue changes. */
+	scopedModelReferences?: string[];
+	/** Origin of the configured scope. */
+	modelScopeSource?: "cli" | "settings";
 
 	/**
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
@@ -181,6 +185,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+	const scopedModels =
+		options.scopedModelReferences !== undefined
+			? resolveExactModelScopeFromModels(options.scopedModelReferences, modelRuntime.getAvailableSnapshot())
+					.scopedModels
+			: options.scopedModels;
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
@@ -210,7 +219,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// If still no model, use findInitialModel (checks settings default, then provider defaults)
 	if (!model) {
 		const result = await findInitialModel({
-			scopedModels: [],
+			scopedModels: scopedModels ?? [],
+			modelScopeConfigured: scopedModels !== undefined || options.scopedModelReferences !== undefined,
 			isContinuing: hasExistingSession,
 			defaultProvider: settingsManager.getDefaultProvider(),
 			defaultModelId: settingsManager.getDefaultModel(),
@@ -395,7 +405,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager,
 		settingsManager,
 		cwd,
-		scopedModels: options.scopedModels,
+		scopedModels,
+		scopedModelReferences: options.scopedModelReferences,
+		modelScopeSource: options.modelScopeSource,
 		resourceLoader,
 		customTools: options.customTools,
 		modelRuntime,
