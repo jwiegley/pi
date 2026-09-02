@@ -697,6 +697,14 @@ Commands run by the LLM-callable `bash` and `powershell` tools also receive curr
 
 These values are resolved when each command starts. See [Environment Variables](docs/environment-variables.md#shell-tool-session-environment) for semantics, examples, and custom-tool opt-out.
 
+## Authenticated remote sessions
+
+The `@earendil-works/pi-coding-agent/client` subpath exports `RemoteSession`. After a `PiClient` transport has authenticated and connected, `RemoteSession.discover(client)` returns durable session metadata from that server. `RemoteSession.open()` acquires an exclusive lease by default; competing client connections receive `session_locked` before work is submitted. Prompt, interrupting `steer`, boundary-queued `followUp`, abort, snapshots, transcript projection, reconnect, and disposal remain on the same handle.
+
+Extensions that must own and correlate one current-session turn can call `pi.startTaskTurn()`. It refuses unless the session is idle, excludes unrelated prompts until completion, and returns a handle whose `completed` promise contains exactly that turn's messages plus distinct `steer()`, `followUp()`, and `abort()` controls.
+
+Transport listeners own authentication. Discovery never scans local session JSONL files and does not bypass a live owner.
+
 ---
 
 ## Contributing & Development
