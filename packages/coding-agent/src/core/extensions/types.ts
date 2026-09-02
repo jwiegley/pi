@@ -1574,6 +1574,8 @@ export interface ProviderModelConfig {
 	baseUrl?: string;
 	/** Whether the model supports extended thinking. */
 	reasoning: boolean;
+	/** Optional model-local safe default used when no user or session thinking preference exists. */
+	defaultThinkingLevel?: Model<Api>["defaultThinkingLevel"];
 	/** Maps pi thinking levels to provider/model-specific values; null marks a level unsupported. */
 	thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 	/** Supported input types. */

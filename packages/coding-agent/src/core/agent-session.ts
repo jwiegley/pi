@@ -1922,17 +1922,15 @@ export class AgentSession {
 	}
 
 	private _getThinkingLevelForModelSwitch(targetModel?: Model<any>, explicitLevel?: ThinkingLevel): ThinkingLevel {
-		if (explicitLevel !== undefined) {
-			return explicitLevel;
-		}
-		// Per-model default takes priority when switching to a model that has one
+		if (explicitLevel !== undefined) return explicitLevel;
 		if (targetModel) {
 			const perModel = this.settingsManager.getModelThinkingLevel(targetModel.provider, targetModel.id);
-			if (perModel !== undefined) {
-				return perModel;
-			}
+			if (perModel !== undefined) return perModel;
 		}
-		return this.settingsManager.getDefaultThinkingLevel() ?? this.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
+		const globalDefault = this.settingsManager.getDefaultThinkingLevel();
+		if (globalDefault !== undefined) return globalDefault;
+		if (this.supportsThinking()) return this.thinkingLevel;
+		return targetModel?.defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL;
 	}
 
 	private _clampThinkingLevel(level: ThinkingLevel, _availableLevels: ThinkingLevel[]): ThinkingLevel {

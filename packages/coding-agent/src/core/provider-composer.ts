@@ -58,6 +58,7 @@ export interface ProviderConfigInput {
 		api?: Api;
 		baseUrl?: string;
 		reasoning: boolean;
+		defaultThinkingLevel?: Model<Api>["defaultThinkingLevel"];
 		thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 		input: ("text" | "image")[];
 		cost: Model<Api>["cost"];
@@ -105,6 +106,7 @@ function applyModelOverride(model: Model<Api>, override: ModelsJsonModelOverride
 		...model,
 		name: override.name ?? model.name,
 		reasoning: override.reasoning ?? model.reasoning,
+		defaultThinkingLevel: override.defaultThinkingLevel ?? model.defaultThinkingLevel,
 		thinkingLevelMap: override.thinkingLevelMap
 			? { ...model.thinkingLevelMap, ...override.thinkingLevelMap }
 			: model.thinkingLevelMap,
@@ -154,6 +156,7 @@ function modelFromJson(
 		provider: providerId,
 		baseUrl,
 		reasoning: definition.reasoning ?? false,
+		defaultThinkingLevel: definition.defaultThinkingLevel,
 		thinkingLevelMap: definition.thinkingLevelMap,
 		input: (definition.input ?? ["text"]) as ("text" | "image")[],
 		cost: definition.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
