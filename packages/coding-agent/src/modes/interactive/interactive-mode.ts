@@ -85,7 +85,7 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
-	resolveModelScopeFromModels,
+	resolveExactModelScopeFromModels,
 } from "../../core/model-resolver.ts";
 import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
@@ -655,10 +655,9 @@ export class InteractiveMode {
 		const modelCommand = slashCommands.find((command) => command.name === "model");
 		if (modelCommand) {
 			modelCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
-				const models =
-					this.session.scopedModels.length > 0
-						? this.session.scopedModels.map((s) => s.model)
-						: this.session.modelRuntime.getAvailableSnapshot();
+				const models = this.session.hasModelScope
+					? this.session.scopedModels.map((s) => s.model)
+					: this.session.modelRuntime.getAvailableSnapshot();
 
 				if (models.length === 0) return null;
 
@@ -869,13 +868,14 @@ export class InteractiveMode {
 		// Load changelog (only show new entries, skip for resumed sessions)
 		this.changelogMarkdown = this.getChangelogForDisplay();
 
-		if (this.session.scopedModels.length > 0 && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
-			const modelList = this.session.scopedModels
-				.map((sm) => {
-					const thinkingStr = sm.thinkingLevel ? `:${sm.thinkingLevel}` : "";
-					return `${sm.model.id}${thinkingStr}`;
-				})
-				.join(", ");
+		if (this.session.hasModelScope && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
+			const modelList =
+				this.session.scopedModels
+					.map((sm) => {
+						const thinkingStr = sm.thinkingLevel ? `:${sm.thinkingLevel}` : "";
+						return `${sm.model.id}${thinkingStr}`;
+					})
+					.join(", ") || "(none currently available)";
 			const cycleKeys = this.keybindings.getKeys("app.model.cycleForward");
 			const cycleHint =
 				cycleKeys.length > 0
@@ -4231,7 +4231,11 @@ export class InteractiveMode {
 		try {
 			const result = await this.session.cycleModel(direction);
 			if (result === undefined) {
-				const msg = this.session.scopedModels.length > 0 ? "Only one model in scope" : "Only one model available";
+				const msg = this.session.hasModelScope
+					? this.session.scopedModels.length === 0
+						? "No models currently available in scope"
+						: "Only one model in scope"
+					: "Only one model available";
 				this.showStatus(msg);
 			} else {
 				this.footer.invalidate();
@@ -4902,12 +4906,11 @@ export class InteractiveMode {
 	}
 
 	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {
-		const cachedModels =
-			this.session.scopedModels.length > 0
-				? this.session.scopedModels.map((scoped) => scoped.model)
-				: [...this.session.modelRuntime.getAvailableSnapshot()];
+		const cachedModels = this.session.hasModelScope
+			? this.session.scopedModels.map((scoped) => scoped.model)
+			: [...this.session.modelRuntime.getAvailableSnapshot()];
 		const cachedMatch = findExactModelReferenceMatch(searchTerm, cachedModels);
-		if (cachedMatch || this.session.scopedModels.length > 0) return cachedMatch;
+		if (cachedMatch || this.session.hasModelScope) return cachedMatch;
 
 		this.showStatus("Refreshing model catalogs…");
 		const controller = new AbortController();
@@ -4937,10 +4940,9 @@ export class InteractiveMode {
 
 	/** Update the footer's available provider count from the current snapshot without refreshing catalogs. */
 	private updateAvailableProviderCount(): void {
-		const models =
-			this.session.scopedModels.length > 0
-				? this.session.scopedModels.map((scoped) => scoped.model)
-				: this.session.modelRuntime.getAvailableSnapshot();
+		const models = this.session.hasModelScope
+			? this.session.scopedModels.map((scoped) => scoped.model)
+			: this.session.modelRuntime.getAvailableSnapshot();
 		const uniqueProviders = new Set(models.map((model) => model.provider));
 		this.footerDataProvider.setAvailableProviderCount(uniqueProviders.size);
 	}
@@ -5058,6 +5060,8 @@ export class InteractiveMode {
 				initialSearchInput,
 				(model) => selectModel(model, true),
 				defaultProvider && defaultModel ? { provider: defaultProvider, id: defaultModel } : undefined,
+				this.session.hasModelScope,
+				() => this.session.scopedModels,
 			);
 			return { component: selector, focus: selector, dispose: () => selector.dispose() };
 		});
@@ -5066,40 +5070,46 @@ export class InteractiveMode {
 	private showModelsSelector(): void {
 		let availableModels = [...this.session.modelRuntime.getAvailableSnapshot()];
 		let availableModelIds = new Set(availableModels.map((model) => `${model.provider}/${model.id}`));
-		const configuredPatterns = this.settingsManager.getEnabledModels();
+		const configuredReferences = this.settingsManager.getEnabledModels();
 		const sessionScopedModels = this.session.scopedModels;
-		const configuredEnabledIds = (models: readonly Model<any>[]): string[] | null => {
-			if (!configuredPatterns?.length) return null;
-			const resolved = resolveModelScopeFromModels(configuredPatterns, models);
-			const ids = resolved.scopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`);
-			for (const diagnostic of resolved.diagnostics) {
-				if (diagnostic.code === "no-match" && !ids.includes(diagnostic.pattern)) ids.push(diagnostic.pattern);
+		const scopeSource = this.session.modelScopeSource;
+		const scopeReferences = scopeSource === "settings" ? configuredReferences : this.session.scopedModelReferences;
+		const referenceById = new Map<string, string>();
+		const enabledIdsForReferences = (references: readonly string[], models: readonly Model<any>[]): string[] => {
+			const ids: string[] = [];
+			for (const reference of references) {
+				const scoped = resolveExactModelScopeFromModels([reference], models).scopedModels[0];
+				const id = scoped ? `${scoped.model.provider}/${scoped.model.id}` : reference;
+				if (ids.includes(id)) continue;
+				ids.push(id);
+				referenceById.set(id, reference);
 			}
 			return ids;
 		};
-
-		let currentEnabledIds =
-			sessionScopedModels.length > 0
-				? sessionScopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`)
-				: configuredEnabledIds(availableModels);
+		const sessionScopeIds =
+			scopeReferences !== undefined
+				? enabledIdsForReferences(scopeReferences, availableModels)
+				: sessionScopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`);
+		let currentEnabledIds = this.session.hasModelScope ? sessionScopeIds : null;
+		const referencesForIds = (ids: readonly string[]): string[] => ids.map((id) => referenceById.get(id) ?? id);
 		let selectionChanged = false;
 
-		const updateSessionModels = (enabledIds: string[] | null): void => {
-			currentEnabledIds = enabledIds === null ? null : [...enabledIds];
-			const hasEnabledAvailableModel = enabledIds?.some((id) => availableModelIds.has(id)) ?? false;
-			const allAvailableModelsEnabled =
-				enabledIds !== null && [...availableModelIds].every((id) => enabledIds.includes(id));
-			if (enabledIds && hasEnabledAvailableModel && !allAvailableModelsEnabled) {
-				const newScopedModels = resolveModelScopeFromModels(enabledIds, availableModels).scopedModels;
-				this.session.setScopedModels(
-					newScopedModels.map((scoped) => ({
-						model: scoped.model,
-						thinkingLevel: scoped.thinkingLevel,
-					})),
-				);
-			} else {
-				this.session.setScopedModels([]);
-			}
+		const updateSessionModels = (
+			enabledIds: string[] | null,
+			source: "cli" | "settings" | undefined = "settings",
+		): void => {
+			const selectedIds = enabledIds === null ? [...availableModelIds] : [...enabledIds];
+			currentEnabledIds = selectedIds;
+			const selectedReferences = referencesForIds(selectedIds);
+			const newScopedModels = resolveExactModelScopeFromModels(selectedReferences, availableModels).scopedModels;
+			this.session.setScopedModels(
+				newScopedModels.map((scoped) => ({
+					model: scoped.model,
+					thinkingLevel: scoped.thinkingLevel,
+				})),
+			);
+			this.session.setScopedModelReferences(selectedReferences);
+			this.session.setModelScopeSource(source);
 			this.updateAvailableProviderCount();
 			this.ui.requestRender();
 		};
@@ -5124,12 +5134,10 @@ export class InteractiveMode {
 						updateSessionModels(enabledIds);
 					},
 					onPersist: (enabledIds) => {
-						const allEnabled =
-							enabledIds !== null &&
-							enabledIds.length === availableModels.length &&
-							enabledIds.every((id) => availableModelIds.has(id));
-						const newPatterns = enabledIds === null || allEnabled ? undefined : enabledIds;
-						this.settingsManager.setEnabledModels(newPatterns ? [...newPatterns] : undefined);
+						const persistedIds = enabledIds ?? [...availableModelIds];
+						const persistedReferences = referencesForIds(persistedIds);
+						updateSessionModels(persistedIds);
+						this.settingsManager.setEnabledModels(persistedReferences);
 						this.showStatus("Model selection saved to settings");
 					},
 					onCancel: () => {
@@ -5143,13 +5151,13 @@ export class InteractiveMode {
 					if (disposed) return;
 					availableModels = [...this.session.modelRuntime.getAvailableSnapshot()];
 					availableModelIds = new Set(availableModels.map((model) => `${model.provider}/${model.id}`));
-					if (!selectionChanged && sessionScopedModels.length === 0) {
-						currentEnabledIds = configuredEnabledIds(availableModels);
+					if (!selectionChanged && scopeReferences !== undefined) {
+						currentEnabledIds = enabledIdsForReferences(scopeReferences, availableModels);
 						selector.updateModels(availableModels, currentEnabledIds);
 					} else {
 						selector.updateModels(availableModels);
 					}
-					if (currentEnabledIds !== null) updateSessionModels(currentEnabledIds);
+					if (currentEnabledIds !== null) updateSessionModels(currentEnabledIds, scopeSource);
 					if (result.aborted && timedOut) {
 						selector.setRefreshStatus("Model refresh timed out; showing cached models.", "warning");
 					} else if (result.errors.size > 0) {

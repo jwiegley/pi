@@ -40,7 +40,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | [`/llama`](llama-cpp.md) | Download, load, and unload llama.cpp router models |
 | `/model` | Switch models; Ctrl+S in the picker saves the startup default |
 | `/thinking` | Switch thinking level; Ctrl+S in the picker saves the startup default |
-| `/scoped-models` | Enable/disable models for Ctrl+P cycling |
+| `/scoped-models` | Select exact provider/model identities for Ctrl+P cycling; later discoveries remain excluded |
 | `/settings` | Theme, message delivery, transport, and other preferences |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |

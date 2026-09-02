@@ -321,10 +321,10 @@ export interface ExtensionContext {
 	modelRegistry: ModelRegistry;
 	/** Current model (may be undefined) */
 	model: Model<any> | undefined;
-	/** Models scoped to this session (resolved from `--models` /
-	 *  `enabledModels` settings against the available catalogue). Same set
-	 *  the `/scoped-models` command shows. Empty when no scoping is
-	 *  configured (all available models are usable). Read-only snapshot. */
+	/** Models currently available within this session's configured scope.
+	 *  CLI `--models` accepts patterns; persisted `enabledModels` entries are exact
+	 *  provider/model identities. The snapshot is the configured scope intersected
+	 *  with the currently available catalogue. */
 	scopedModels: readonly ScopedModel[];
 	/** Current thinking level, when provided by the session runtime. */
 	thinkingLevel?: ThinkingLevel;

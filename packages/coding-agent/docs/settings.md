@@ -259,13 +259,15 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `enabledModels` | string[] | - | Model patterns for Ctrl+P cycling (same format as `--models` CLI flag) |
+| `enabledModels` | string[] | - | Exact `provider/model` identities selected for Ctrl+P cycling |
 
 ```json
 {
-  "enabledModels": ["claude-*", "gpt-4o", "gemini-2*"]
+  "enabledModels": ["anthropic/claude-sonnet-4-5", "openai-codex/gpt-5.5"]
 }
 ```
+
+`enabledModels` is an explicit allowlist. Provider globs and fuzzy names are not expanded; models discovered later remain outside the scope until selected with `/scoped-models`. The `--models` CLI option continues to accept patterns for one process.
 
 ### Markdown
 
@@ -337,7 +339,7 @@ See [packages.md](packages.md) for package management details.
     "enabled": true,
     "maxRetries": 3
   },
-  "enabledModels": ["claude-*", "gpt-4o"],
+  "enabledModels": ["anthropic/claude-sonnet-4-5", "openai-codex/gpt-5.5"],
   "warnings": {
     "anthropicExtraUsage": true
   },

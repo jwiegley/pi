@@ -278,6 +278,74 @@ export interface ResolveModelScopeResult {
 	diagnostics: ModelScopeDiagnostic[];
 }
 
+function findCanonicalScopedModelReference(reference: string, models: readonly Model<Api>[]): Model<Api> | undefined {
+	const slashIndex = reference.indexOf("/");
+	if (slashIndex <= 0 || slashIndex === reference.length - 1) return undefined;
+	const normalized = reference.toLowerCase();
+	const matches = models.filter((model) => `${model.provider}/${model.id}`.toLowerCase() === normalized);
+	return matches.length === 1 ? matches[0] : undefined;
+}
+
+function parseExactScopedModelReference(
+	reference: string,
+	models: readonly Model<Api>[],
+): { model: Model<Api> | undefined; thinkingLevel?: ThinkingLevel } {
+	const exact = findCanonicalScopedModelReference(reference, models);
+	if (exact) return { model: exact };
+
+	const colonIndex = reference.lastIndexOf(":");
+	if (colonIndex === -1) return { model: undefined };
+	const suffix = reference.substring(colonIndex + 1);
+	if (!isValidThinkingLevel(suffix)) return { model: undefined };
+	return {
+		model: findCanonicalScopedModelReference(reference.substring(0, colonIndex), models),
+		thinkingLevel: suffix,
+	};
+}
+
+/** Resolve persisted scope entries as exact provider/model identities. */
+export function resolveExactModelScopeFromModels(
+	references: string[],
+	models: readonly Model<Api>[],
+): ResolveModelScopeResult {
+	const scopedModels: ScopedModel[] = [];
+	const diagnostics: ModelScopeDiagnostic[] = [];
+	for (const reference of references) {
+		const { model, thinkingLevel } = parseExactScopedModelReference(reference, models);
+		if (!model) {
+			diagnostics.push({
+				type: "warning",
+				code: "no-match",
+				message: `No model matches exact scoped reference "${reference}"`,
+				pattern: reference,
+			});
+			continue;
+		}
+		if (!scopedModels.some((scoped) => modelsAreEqual(scoped.model, model))) {
+			scopedModels.push({ model, thinkingLevel });
+		}
+	}
+	return { scopedModels, diagnostics };
+}
+
+export async function resolveExactModelScopeWithDiagnostics(
+	references: string[],
+	modelRuntime: ModelRuntime,
+	options?: AuthOperationOptions,
+): Promise<ResolveModelScopeResult> {
+	return resolveExactModelScopeFromModels(references, await modelRuntime.getAvailable(undefined, options));
+}
+
+export async function resolveExactModelScope(
+	references: string[],
+	modelRuntime: ModelRuntime,
+	options?: AuthOperationOptions,
+): Promise<ScopedModel[]> {
+	const { scopedModels, diagnostics } = await resolveExactModelScopeWithDiagnostics(references, modelRuntime, options);
+	for (const diagnostic of diagnostics) console.warn(chalk.yellow(`Warning: ${diagnostic.message}`));
+	return scopedModels;
+}
+
 export function resolveModelScopeFromModels(
 	patterns: string[],
 	models: readonly Model<Api>[],
@@ -613,7 +681,7 @@ export interface InitialModelResult {
 /**
  * Find the initial model to use based on priority:
  * 1. CLI args (provider + model)
- * 2. First model from scoped models (if not continuing/resuming)
+ * 2. First model from an explicit scope, including an empty scope (if not continuing/resuming)
  * 3. Restored from session (if continuing/resuming)
  * 4. Saved default from settings
  * 5. First available model with valid API key
@@ -622,6 +690,7 @@ export async function findInitialModel(options: {
 	cliProvider?: string;
 	cliModel?: string;
 	scopedModels: ScopedModel[];
+	modelScopeConfigured?: boolean;
 	isContinuing: boolean;
 	defaultProvider?: string;
 	defaultModelId?: string;
@@ -633,6 +702,7 @@ export async function findInitialModel(options: {
 		cliProvider,
 		cliModel,
 		scopedModels,
+		modelScopeConfigured = false,
 		isContinuing,
 		defaultProvider,
 		defaultModelId,
@@ -660,8 +730,11 @@ export async function findInitialModel(options: {
 		}
 	}
 
-	// 2. Use first model from scoped models (skip if continuing/resuming)
-	if (scopedModels.length > 0 && !isContinuing) {
+	// 2. Respect an explicit scope, including an empty one (skip if continuing/resuming)
+	if (modelScopeConfigured && !isContinuing) {
+		if (scopedModels.length === 0) {
+			return { model: undefined, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+		}
 		const scopedModel = scopedModels[0];
 		const perModel = modelThinkingLevels?.[`${scopedModel.model.provider}/${scopedModel.model.id}`];
 		return {

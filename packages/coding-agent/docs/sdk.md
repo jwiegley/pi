@@ -406,8 +406,9 @@ const { session } = await createAgentSession({
 
 If no model is provided:
 1. Tries to restore from session (if continuing)
-2. Uses default from settings
-3. Falls back to first available model
+2. Uses the first model from an explicit scope; an explicit empty scope selects no model
+3. Uses the default from settings
+4. Falls back to the first available model
 
 Remote catalogs are persisted locally so later runtimes can restore them without a network request. The default file is `~/.pi/agent/models-store.json`; set `modelsStorePath` to choose another location, or inject `modelsStore` to control persistence. Network refreshes are throttled to once per provider every four hours unless forced. To force an immediate refresh, call `await modelRuntime.refresh({ allowNetwork: true, force: true, signal })`. Setting `PI_OFFLINE` disables model network access.
 
@@ -416,6 +417,7 @@ To match CLI model parsing, use the exported resolver helpers:
 ```typescript
 import {
   resolveCliModel,
+  resolveExactModelScopeWithDiagnostics,
   resolveModelScopeWithDiagnostics,
 } from "@earendil-works/pi-coding-agent";
 
@@ -433,9 +435,14 @@ const { scopedModels, diagnostics } = await resolveModelScopeWithDiagnostics(
 for (const diagnostic of diagnostics) {
   console.warn(diagnostic.message);
 }
+
+const persistedScope = await resolveExactModelScopeWithDiagnostics(
+  ["anthropic/claude-opus-4-5", "openai-codex/gpt-5.5"],
+  modelRuntime,
+);
 ```
 
-`resolveCliModel()` uses all registered models so `--api-key` style first-time setup can resolve a model before stored auth exists. `resolveModelScopeWithDiagnostics()` matches `--models` and `enabledModels` semantics while returning warnings instead of printing them.
+`resolveCliModel()` uses all registered models so `--api-key` style first-time setup can resolve a model before stored auth exists. `resolveModelScopeWithDiagnostics()` retains glob and fuzzy matching for CLI `--models`. `resolveExactModelScopeWithDiagnostics()` applies persisted `enabledModels` semantics: exact provider/model identities only, intersected with the available catalogue. Both scope helpers return diagnostics instead of printing them.
 
 > See [examples/sdk/02-custom-model.ts](../examples/sdk/02-custom-model.ts)
 

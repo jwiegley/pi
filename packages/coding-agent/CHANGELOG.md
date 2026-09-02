@@ -68,6 +68,7 @@
 
 - Fixed deferred footer renders retaining a replaced session after its history store closes.
 - Fixed concurrent first opens misclassifying a partially initialized session lock database as foreign.
+- Fixed persisted model scopes expanding provider globs and admitting newly registered models that were never explicitly selected.
 
 ## [0.84.4] - 2026-08-28
 

@@ -597,6 +597,29 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("getEnabledModels", () => {
+		it("returns an isolated exact-reference list", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ enabledModels: ["factory/selected", "openrouter/shared"] }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			const enabled = manager.getEnabledModels();
+			expect(enabled).toEqual(["factory/selected", "openrouter/shared"]);
+			enabled?.push("factory/unselected");
+			expect(manager.getEnabledModels()).toEqual(["factory/selected", "openrouter/shared"]);
+		});
+
+		it.each(["factory/*", ["factory/selected", 42], { factory: "selected" }])(
+			"fails closed for malformed enabledModels state: %j",
+			(enabledModels) => {
+				writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ enabledModels }));
+				const manager = SettingsManager.create(projectDir, agentDir);
+				expect(manager.getEnabledModels()).toEqual([]);
+			},
+		);
+	});
+
 	describe("getShellPath", () => {
 		it("should return undefined when not set", () => {
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
