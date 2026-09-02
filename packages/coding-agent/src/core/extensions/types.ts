@@ -1957,6 +1957,8 @@ export interface ProviderChatModelConfig extends ProviderModelConfigBase {
 	api?: Api;
 	/** Whether the model supports extended thinking. */
 	reasoning: boolean;
+	/** Optional model-local safe default used when no user or session thinking preference exists. */
+	defaultThinkingLevel?: Model<Api>["defaultThinkingLevel"];
 	/** Maps pi thinking levels to provider/model-specific values; null marks a level unsupported. */
 	thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 	/** Best-effort prompt cache lifetime in seconds per retention tier. Unset disables cache warming. */

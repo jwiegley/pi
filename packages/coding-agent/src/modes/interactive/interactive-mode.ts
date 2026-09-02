@@ -581,7 +581,11 @@ export class InteractiveMode {
 		this.options = { ...options, tuiMode };
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
-			this.resetExtensionUI();
+			try {
+				this.resetExtensionUI();
+			} finally {
+				this.footer.detachSession();
+			}
 		});
 		this.runtimeHost.setRebindSession(async () => {
 			await this.rebindCurrentSession({ renderBeforeBind: true });
@@ -1103,15 +1107,6 @@ export class InteractiveMode {
 	 */
 	async run(): Promise<void> {
 		await this.init();
-
-		if (!process.env.PI_OFFLINE) {
-			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), 15_000);
-			void refreshModelCatalogs(this.session.modelRuntime, controller.signal)
-				.then(() => this.updateAvailableProviderCount())
-				.catch(() => {})
-				.finally(() => clearTimeout(timeout));
-		}
 
 		// Start version check asynchronously
 		checkForNewPiVersion(this.version).then((newRelease) => {
@@ -2005,7 +2000,7 @@ export class InteractiveMode {
 			this.renderer.setCopyOnSelect(this.settingsManager.getFullscreenCopyOnSelect());
 			this.renderer.setWheelScrollLines(this.settingsManager.getFullscreenWheelScrollLines());
 		}
-		this.footer.setSession(this.session);
+		this.footer.bindSession(this.session);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
