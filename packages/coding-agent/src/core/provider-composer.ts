@@ -189,13 +189,14 @@ function applyModelsJson(
 		!config.baseUrl &&
 		!config.headers &&
 		!config.compat &&
+		!config.transport &&
 		!hasOverrides &&
 		!config.apiKey &&
 		!config.oauth &&
 		config.authHeader === undefined
 	) {
 		throw new Error(
-			`Provider ${providerId}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".`,
+			`Provider ${providerId}: must specify "baseUrl", "headers", "compat", "transport", "modelOverrides", or "models".`,
 		);
 	}
 
