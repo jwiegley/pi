@@ -44,6 +44,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
+	ToolRendererWrapper,
 } from "./types.ts";
 
 /** Modules available to extensions via virtualModules (for compiled binaries) */
@@ -294,6 +295,13 @@ function createExtensionAPI(
 			runtime.refreshTools();
 		},
 
+		registerToolRenderer(wrapper: ToolRendererWrapper): void {
+			assertActive();
+			if (typeof wrapper !== "function") throw new TypeError("registerToolRenderer expects a function");
+			extension.toolRenderers.push(wrapper);
+			runtime.refreshTools();
+		},
+
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
 			assertActive();
 			extension.commands.set(name, {
@@ -538,6 +546,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		sourceInfo: createSyntheticSourceInfo(extensionPath, { source, baseDir }),
 		handlers: new Map(),
 		tools: new Map(),
+		toolRenderers: [],
 		messageRenderers: new Map(),
 		entryRenderers: new Map(),
 		commands: new Map(),
