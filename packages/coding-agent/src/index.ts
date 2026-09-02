@@ -223,6 +223,8 @@ export {
 	type ResolveCliModelResult,
 	type ResolveModelScopeResult,
 	resolveCliModel,
+	resolveExactModelScopeFromModels,
+	resolveExactModelScopeWithDiagnostics,
 	resolveModelScopeWithDiagnostics,
 	type ScopedModel,
 } from "./core/model-resolver.ts";

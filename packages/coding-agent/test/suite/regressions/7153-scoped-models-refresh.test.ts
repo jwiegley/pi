@@ -95,6 +95,25 @@ describe("issue #7153 scoped models refresh", () => {
 		});
 	});
 
+	it("keeps newly discovered models outside an explicit scope", async () => {
+		harness = await createHarness({
+			models: [
+				{ id: "cached", name: "Cached" },
+				{ id: "refreshed", name: "Refreshed" },
+			],
+		});
+		harness.session.setScopedModels([{ model: harness.models[0] }]);
+		const refresh = openSelector(harness, [harness.models[0]]);
+
+		refresh.complete(harness.models, { aborted: false, errors: new Map() });
+		await vi.waitFor(() => {
+			expect(harness?.session.scopedModels.map(({ model }) => model.id)).toEqual(["cached"]);
+			const rendered = stripAnsi(refresh.selector.render(100).join("\n"));
+			expect(rendered).toContain("refreshed");
+			expect(rendered).toContain("1/2 enabled");
+		});
+	});
+
 	it("cancels the background refresh when the selector closes", async () => {
 		harness = await createHarness({ models: [{ id: "cached", name: "Cached" }] });
 		const refresh = openSelector(harness, harness.models);

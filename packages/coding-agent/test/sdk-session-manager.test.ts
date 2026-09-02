@@ -3,8 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
 
 describe("createAgentSession session manager defaults", () => {
 	let tempDir: string;
@@ -127,5 +129,47 @@ describe("createAgentSession session manager defaults", () => {
 		]);
 
 		session.dispose();
+	});
+
+	it("treats exact references without pre-resolved models as an explicit scope", async () => {
+		const authStorage = AuthStorage.inMemory();
+		await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
+		const modelRegistry = await createModelRegistry(authStorage);
+		const modelRuntime = getModelRuntime(modelRegistry);
+		expect(modelRuntime.getAvailableSnapshot().length).toBeGreaterThan(0);
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			modelRuntime,
+			sessionManager: SessionManager.inMemory(cwd),
+			scopedModelReferences: [],
+			modelScopeSource: "settings",
+		});
+
+		expect(session.hasModelScope).toBe(true);
+		expect(session.scopedModels).toEqual([]);
+		expect(session.model?.provider).toBe("unknown");
+		expect(
+			modelRuntime
+				.getAvailableSnapshot()
+				.some((model) => model.provider === session.model?.provider && model.id === session.model.id),
+		).toBe(false);
+		expect(await session.cycleModel()).toBeUndefined();
+		session.dispose();
+
+		const selected = modelRuntime.getAvailableSnapshot()[0];
+		if (!selected) throw new Error("Expected an available model");
+		const { session: conflictingSession } = await createAgentSession({
+			cwd,
+			agentDir,
+			modelRuntime,
+			sessionManager: SessionManager.inMemory(cwd),
+			scopedModels: [{ model: selected }],
+			scopedModelReferences: [],
+			modelScopeSource: "settings",
+		});
+		expect(conflictingSession.scopedModels).toEqual([]);
+		expect(await conflictingSession.cycleModel()).toBeUndefined();
+		conflictingSession.dispose();
 	});
 });

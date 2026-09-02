@@ -39,7 +39,13 @@ describe("AgentSessionRuntime characterization", () => {
 
 	async function createRuntimeForTest(
 		extensionFactory: ExtensionFactory,
-		options?: { cwd?: string; bootstrapModel?: boolean; bootstrapThinkingLevel?: boolean },
+		options?: {
+			cwd?: string;
+			bootstrapModel?: boolean;
+			bootstrapThinkingLevel?: boolean;
+			modelScope?: "empty" | "first";
+			modelScopeSource?: "cli" | "settings";
+		},
 	) {
 		const tempDir =
 			options?.cwd ?? join(tmpdir(), `pi-runtime-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -99,6 +105,19 @@ describe("AgentSessionRuntime characterization", () => {
 					sessionStartEvent,
 					model: runtimeOptions.model,
 					thinkingLevel: runtimeOptions.thinkingLevel,
+					scopedModels:
+						options?.modelScope === "empty"
+							? []
+							: options?.modelScope === "first"
+								? [{ model: faux.getModel() }]
+								: undefined,
+					scopedModelReferences:
+						options?.modelScope === "empty"
+							? []
+							: options?.modelScope === "first"
+								? [`${faux.getModel().provider}/${faux.getModel().id}`]
+								: undefined,
+					modelScopeSource: options?.modelScope ? (options.modelScopeSource ?? "settings") : undefined,
 				})),
 				services,
 				diagnostics: services.diagnostics,
@@ -121,6 +140,44 @@ describe("AgentSessionRuntime characterization", () => {
 
 		return { runtime, faux, tempDir };
 	}
+
+	it("preserves an explicitly empty model scope across session replacement", async () => {
+		const { runtime } = await createRuntimeForTest(() => {}, { modelScope: "empty" });
+		expect(runtime.session.hasModelScope).toBe(true);
+		expect(runtime.session.scopedModels).toEqual([]);
+		expect(runtime.session.scopedModelReferences).toEqual([]);
+		expect(runtime.session.modelScopeSource).toBe("settings");
+		await runtime.session.prompt("hello");
+		const originalSessionFile = runtime.session.sessionFile!;
+
+		await runtime.newSession();
+		expect(runtime.session.hasModelScope).toBe(true);
+		expect(runtime.session.scopedModels).toEqual([]);
+		expect(runtime.session.scopedModelReferences).toEqual([]);
+		expect(runtime.session.modelScopeSource).toBe("settings");
+
+		await runtime.switchSession(originalSessionFile);
+		expect(runtime.session.hasModelScope).toBe(true);
+		expect(runtime.session.scopedModels).toEqual([]);
+		expect(runtime.session.scopedModelReferences).toEqual([]);
+		expect(runtime.session.modelScopeSource).toBe("settings");
+	});
+
+	it("preserves a resolved CLI scope across session replacement", async () => {
+		const { runtime, faux } = await createRuntimeForTest(() => {}, {
+			modelScope: "first",
+			modelScopeSource: "cli",
+		});
+		const expected = [`${faux.getModel().provider}/${faux.getModel().id}`];
+		expect(runtime.session.scopedModelReferences).toEqual(expected);
+		expect(runtime.session.modelScopeSource).toBe("cli");
+		expect(runtime.session.scopedModels.map(({ model }) => `${model.provider}/${model.id}`)).toEqual(expected);
+
+		await runtime.newSession();
+		expect(runtime.session.scopedModelReferences).toEqual(expected);
+		expect(runtime.session.modelScopeSource).toBe("cli");
+		expect(runtime.session.scopedModels.map(({ model }) => `${model.provider}/${model.id}`)).toEqual(expected);
+	});
 
 	it("persists message_end assistant replacements to the session manager", async () => {
 		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
