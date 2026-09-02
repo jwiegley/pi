@@ -96,6 +96,7 @@ describe("test harness", () => {
 
 		await harness.session.prompt("hi");
 
+		expect(harness.faux.callCount).toBe(1);
 		const assistantMessages = harness.session.messages.filter((m): m is AssistantMessage => m.role === "assistant");
 		expect(assistantMessages).toHaveLength(1);
 		expect(assistantMessages[0].stopReason).toBe("error");

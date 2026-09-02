@@ -73,6 +73,8 @@ Extensions that must own and correlate one current-session turn can call `pi.sta
 
 Transport listeners own authentication. Discovery never scans local session JSONL files and does not bypass a live owner.
 
+HTML exports are published without clobbering: the destination must not already exist.
+
 ## License
 
 MIT

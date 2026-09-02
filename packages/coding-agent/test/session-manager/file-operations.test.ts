@@ -1,13 +1,17 @@
 import { constants as bufferConstants } from "buffer";
+import { createHash } from "crypto";
 import {
 	appendFileSync,
+	chmodSync,
 	closeSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	openSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 	writeSync,
 } from "fs";
@@ -42,6 +46,10 @@ describe("loadEntriesFromFile", () => {
 				cwd,
 			})}\n`,
 		);
+	}
+
+	function sha256(file: string): string {
+		return createHash("sha256").update(readFileSync(file)).digest("hex");
 	}
 
 	it("returns empty array for non-existent file", () => {
@@ -136,10 +144,10 @@ describe("loadEntriesFromFile", () => {
 		expect(sessionManager.getCwd()).toBe(storedCwd);
 	});
 
-	it("opens compatible sessions beyond the discovery scan limit", () => {
+	it("rejects oversized headers and malformed prefixes without changing the source", () => {
 		const storedCwd = join(tempDir, "stored-project");
 		const overrideCwd = join(tempDir, "override-project");
-		const cases = [
+		const shapes = [
 			{ name: "large-header", id: "a".repeat(HEADER_SCAN_LIMIT_BYTES + 1), prefix: "" },
 			{
 				name: "large-prefix",
@@ -147,14 +155,34 @@ describe("loadEntriesFromFile", () => {
 				prefix: `${"x".repeat(HEADER_SCAN_LIMIT_BYTES + 1)}\n`,
 			},
 		];
+		const operations = [
+			{
+				name: "open",
+				run: (file: string) => SessionManager.open(file, tempDir).close(),
+			},
+			{
+				name: "open-override",
+				run: (file: string) => SessionManager.open(file, tempDir, overrideCwd).close(),
+			},
+			{
+				name: "fork",
+				run: (file: string) => SessionManager.forkFrom(file, overrideCwd, tempDir, { id: "bounded-fork" }).close(),
+			},
+		];
 
-		for (const { name, id, prefix } of cases) {
-			const file = join(tempDir, `${name}.jsonl`);
-			writeSessionHeader(file, storedCwd, id, prefix);
-			for (const cwdOverride of [undefined, overrideCwd]) {
-				const sessionManager = SessionManager.open(file, tempDir, cwdOverride);
-				expect(sessionManager.getSessionId()).toBe(id);
-				expect(sessionManager.getCwd()).toBe(cwdOverride ?? storedCwd);
+		for (const shape of shapes) {
+			for (const operation of operations) {
+				const file = join(tempDir, `${shape.name}-${operation.name}.jsonl`);
+				writeSessionHeader(file, storedCwd, shape.id, shape.prefix);
+				chmodSync(file, 0o640);
+				const beforeHash = sha256(file);
+				const beforeMode = statSync(file).mode & 0o777;
+				const beforeFiles = readdirSync(tempDir).sort();
+
+				expect(() => operation.run(file)).toThrow("scan limit");
+				expect(sha256(file)).toBe(beforeHash);
+				expect(statSync(file).mode & 0o777).toBe(beforeMode);
+				expect(readdirSync(tempDir).sort()).toEqual(beforeFiles);
 			}
 		}
 	});

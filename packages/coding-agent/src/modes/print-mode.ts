@@ -137,8 +137,14 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		}
 
 		if (mode === "text") {
-			const state = session.state;
-			const lastMessage = state.messages[state.messages.length - 1];
+			const compatibleSession = session as {
+				readonly lastMessage?: typeof session.lastMessage;
+				readonly state: typeof session.state;
+			};
+			const lastMessage =
+				"lastMessage" in compatibleSession
+					? compatibleSession.lastMessage
+					: compatibleSession.state.messages[compatibleSession.state.messages.length - 1];
 
 			if (lastMessage?.role === "assistant") {
 				const assistantMsg = lastMessage as AssistantMessage;

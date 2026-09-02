@@ -49,6 +49,8 @@ Use a single file for a small extension and a directory for a multi-file impleme
 
 Reload replaces the extension runtime, so code after `await ctx.reload()` must not reuse state from the old runtime. Only personal and explicit command-line extensions can participate in the `project_trust` event that runs before project extensions load.
 
+For session history, use `ctx.sessionManager.getEntriesPage()`, `getTreePage()`, targeted lookups, or iterators. `getEntries()` and `getTree()` are deprecated compatibility APIs that materialize complete history.
+
 <a id="understand-the-lifecycle"></a>
 
 ## Respect the runtime lifecycle

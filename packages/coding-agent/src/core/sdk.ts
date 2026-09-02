@@ -191,9 +191,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	// Check if session has existing data to restore
-	const existingSession = sessionManager.buildSessionContext();
+	const existingSession = sessionManager.buildSessionContextSource();
 	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
+	const hasThinkingEntry = sessionManager.hasThinkingLevelChange();
 
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
@@ -390,7 +390,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			model,
 			thinkingLevel,
 			tools: [],
-			messages: existingSession.messages,
+			messages: [],
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
@@ -423,6 +423,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Restore missing settings metadata for older sessions.
 	if (hasExistingSession) {
+		agent.setMessageSource(existingSession.messages);
 		if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
 		}

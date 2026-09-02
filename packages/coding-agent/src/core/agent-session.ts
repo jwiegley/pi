@@ -72,6 +72,7 @@ import {
 	compact,
 	estimateContextTokens,
 	estimateProjectedContextTokens,
+	estimateContextTokensReverse,
 	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
@@ -125,6 +126,7 @@ import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
 	type ContextEditEntry,
+	type CursorPageOptions,
 	getLatestCompactionEntry,
 	type SessionEntry,
 	SessionManager,
@@ -338,18 +340,35 @@ export interface SessionStats {
 	contextUsage?: ContextUsage;
 }
 
+export interface ForkMessageChoice {
+	entryId: string;
+	/** Bounded display preview, not necessarily the complete user message. */
+	text: string;
+	textTruncated?: boolean;
+}
+
+export interface ForkMessagePage {
+	messages: ForkMessageChoice[];
+	nextOrdinal: number | null;
+}
+
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
 	sourceInfo: SourceInfo;
 }
 
-function estimateMessagesTokens(messages: AgentMessage[]): number {
+function estimateMessagesTokens(messages: Iterable<AgentMessage>): number {
 	let tokens = 0;
 	for (const message of messages) {
 		tokens += estimateTokens(message);
 	}
 	return tokens;
 }
+
+// ============================================================================
+// Constants
+// ============================================================================
+const FORK_MESSAGE_PREVIEW_BYTES = 4 * 1024;
 
 // ============================================================================
 // AgentSession Class
@@ -1215,14 +1234,7 @@ export class AgentSession {
 
 	/** Find the last assistant message in agent state (including aborted ones) */
 	private _findLastAssistantMessage(): AssistantMessage | undefined {
-		const messages = this.agent.state.messages;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
-			if (msg.role === "assistant") {
-				return msg as AssistantMessage;
-			}
-		}
-		return undefined;
+		return this.agent.findLastMessage("assistant") as AssistantMessage | undefined;
 	}
 
 	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
@@ -1370,6 +1382,7 @@ export class AgentSession {
 			this._cacheWarmer.onWarmed = undefined;
 			this._cacheWarmer.cancel();
 		}
+		this.sessionManager.close();
 		cleanupSessionResources(this.sessionId);
 	}
 
@@ -1559,6 +1572,21 @@ export class AgentSession {
 	/** All messages including custom types like BashExecutionMessage */
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
+	}
+
+	/** Message count without materializing a deferred transcript. */
+	get messageCount(): number {
+		return this.agent.messageCount;
+	}
+
+	/** Final message without materializing a deferred transcript. */
+	get lastMessage(): AgentMessage | undefined {
+		return this.agent.lastMessage;
+	}
+
+	/** Detached real-array snapshot for serialization and diagnostics. */
+	getMessagesSnapshot(): AgentMessage[] {
+		return this.agent.getMessagesSnapshot();
 	}
 
 	/** Current steering mode */
@@ -2736,7 +2764,7 @@ export class AgentSession {
 			}
 
 			const settings = this.settingsManager.getCompactionSettings(model);
-			const pathEntries = this.sessionManager.getBranch();
+			const pathEntries = this.sessionManager.getActiveContextEntries();
 
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
@@ -2805,15 +2833,19 @@ export class AgentSession {
 				throw new Error("Compaction cancelled");
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
+			const compactionId = this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				usage,
+			);
 			this._refreshFinalizedContext();
-			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
+			const estimatedTokensAfter = estimateMessagesTokens(this.agent.iterateMessagesReverse());
 
 			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
+			const savedCompactionEntry = this.sessionManager.getEntry(compactionId) as CompactionEntry | undefined;
 
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
@@ -2928,7 +2960,7 @@ export class AgentSession {
 		// Skip compaction checks if this assistant message is older than the latest
 		// compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		const compactionEntry = this.sessionManager.getLatestActiveCompaction() ?? null;
 		const assistantIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
 		if (assistantIsFromBeforeCompaction) {
@@ -3018,20 +3050,12 @@ export class AgentSession {
 		if (hasContextEdits) {
 			contextTokens = estimateProjectedContextTokens(projection, branch).tokens;
 		} else if (assistantMessage.stopReason === "error" || directContextTokens === 0) {
-			const messages = this.agent.state.messages;
-			const estimate = estimateContextTokens(messages);
+			const estimate = estimateContextTokensReverse(this.agent.iterateMessagesReverse(), this.agent.messageCount);
 			// Without provider usage, estimate.tokens is the pure message-size estimate.
 			// Only usage-backed estimates need the stale pre-compaction check.
 			if (estimate.lastUsageIndex !== null) {
-				// Verify the usage source is post-compaction. Kept pre-compaction messages
-				// have stale usage reflecting the old (larger) context and would falsely
-				// trigger compaction right after one just finished.
-				const usageMsg = messages[estimate.lastUsageIndex];
-				if (
-					compactionEntry &&
-					usageMsg.role === "assistant" &&
-					(usageMsg as AssistantMessage).timestamp <= new Date(compactionEntry.timestamp).getTime()
-				) {
+				const usageMsg = estimate.lastUsageMessage;
+				if (compactionEntry && usageMsg && usageMsg.timestamp <= new Date(compactionEntry.timestamp).getTime()) {
 					return false;
 				}
 			}
@@ -3068,7 +3092,7 @@ export class AgentSession {
 				return false;
 			}
 
-			const pathEntries = this.sessionManager.getBranch();
+			const pathEntries = this.sessionManager.getActiveContextEntries();
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
 				return false;
@@ -3135,15 +3159,19 @@ export class AgentSession {
 			}
 			abortController.signal.throwIfAborted();
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
+			const compactionId = this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				usage,
+			);
 			this._refreshFinalizedContext();
-			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
+			const estimatedTokensAfter = estimateMessagesTokens(this.agent.iterateMessagesReverse());
 
 			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
+			const savedCompactionEntry = this.sessionManager.getEntry(compactionId) as CompactionEntry | undefined;
 
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
@@ -4104,22 +4132,56 @@ export class AgentSession {
 		}
 	}
 
+	/** Read one bounded page of user-message choices from every branch. */
+	async getUserMessagesForForkingPage(options: CursorPageOptions = {}): Promise<ForkMessagePage> {
+		const page = await this.sessionManager.getTreePage({
+			...options,
+			type: "message",
+			messageRole: "user",
+		});
+		const messages: ForkMessageChoice[] = [];
+		for (const record of page.entries) {
+			const entry = this.sessionManager.getEntry(record.id);
+			if (entry?.type !== "message" || entry.message.role !== "user") continue;
+			const text = contentText(entry.message.content, "");
+			if (!text) continue;
+			const textBytes = Buffer.byteLength(text);
+			if (textBytes <= FORK_MESSAGE_PREVIEW_BYTES) {
+				messages.push({ entryId: entry.id, text });
+				continue;
+			}
+			const preview = Buffer.allocUnsafe(FORK_MESSAGE_PREVIEW_BYTES);
+			const bytesWritten = preview.write(text, 0, preview.length, "utf8");
+			messages.push({
+				entryId: entry.id,
+				text: preview.toString("utf8", 0, bytesWritten),
+				textTruncated: true,
+			});
+		}
+		return { messages, nextOrdinal: page.nextOrdinal };
+	}
+
 	/**
-	 * Get all user messages from session for fork selector.
+	 * @deprecated Expensive compatibility API: materializes every user-message choice and its complete text.
+	 * Use getUserMessagesForForkingPage() for bounded selector/RPC reads.
 	 */
 	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
-		const entries = this.sessionManager.getEntries();
 		const result: Array<{ entryId: string; text: string }> = [];
-
-		for (const entry of entries) {
-			if (entry.type !== "message") continue;
-			if (entry.message.role !== "user") continue;
-
-			const text = contentText(entry.message.content, "");
-			if (text) {
-				result.push({ entryId: entry.id, text });
+		let afterOrdinal: number | undefined;
+		do {
+			const page = this.sessionManager.getEntriesPage({
+				afterOrdinal,
+				type: "message",
+				messageRole: "user",
+				limit: 4096,
+			});
+			for (const entry of page.entries) {
+				if (entry.type !== "message" || entry.message.role !== "user") continue;
+				const text = contentText(entry.message.content, "");
+				if (text) result.push({ entryId: entry.id, text });
 			}
-		}
+			afterOrdinal = page.nextOrdinal;
+		} while (afterOrdinal !== undefined);
 
 		return result;
 	}
@@ -4130,55 +4192,24 @@ export class AgentSession {
 	 * actually billed across the session.
 	 */
 	getSessionStats(): SessionStats {
-		let userMessages = 0;
-		let assistantMessages = 0;
-		let toolResults = 0;
-		let totalMessages = 0;
-		let toolCalls = 0;
-		const usageTotals = createUsageTotals();
-
-		for (const entry of this.sessionManager.getEntries()) {
-			if (entry.type === "usage") {
-				addUsageToTotals(usageTotals, entry.usage);
-			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
-				addUsageToTotals(usageTotals, entry.usage);
-			}
-			if (entry.type !== "message") continue;
-			totalMessages++;
-			const message = entry.message;
-			if (message.role === "user") {
-				userMessages++;
-			} else if (message.role === "toolResult") {
-				toolResults++;
-				if (message.usage) {
-					addUsageToTotals(usageTotals, message.usage);
-				}
-			} else if (message.role === "assistant") {
-				assistantMessages++;
-				const assistantMsg = message as AssistantMessage;
-				if (Array.isArray(assistantMsg.content)) {
-					toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				}
-				addUsageToTotals(usageTotals, assistantMsg.usage);
-			}
-		}
+		const summary = this.sessionManager.getHistorySummary();
 
 		return {
 			sessionFile: this.sessionFile,
 			sessionId: this.sessionId,
-			userMessages,
-			assistantMessages,
-			toolCalls,
-			toolResults,
-			totalMessages,
+			userMessages: summary.userMessages,
+			assistantMessages: summary.assistantMessages,
+			toolCalls: summary.toolCalls,
+			toolResults: summary.toolResults,
+			totalMessages: summary.totalMessages,
 			tokens: {
-				input: usageTotals.input,
-				output: usageTotals.output,
-				cacheRead: usageTotals.cacheRead,
-				cacheWrite: usageTotals.cacheWrite,
-				total: usageTotals.input + usageTotals.output + usageTotals.cacheRead + usageTotals.cacheWrite,
+				input: summary.usage.input,
+				output: summary.usage.output,
+				cacheRead: summary.usage.cacheRead,
+				cacheWrite: summary.usage.cacheWrite,
+				total: summary.usage.input + summary.usage.output + summary.usage.cacheRead + summary.usage.cacheWrite,
 			},
-			cost: usageTotals.cost,
+			cost: summary.usage.cost,
 			contextUsage: this.getContextUsage(),
 		};
 	}
@@ -4293,21 +4324,16 @@ export class AgentSession {
 	 * @returns Text content, or undefined if no assistant message exists
 	 */
 	getLastAssistantText(): string | undefined {
-		const lastAssistant = this.messages
-			.slice()
-			.reverse()
-			.find((m) => {
-				if (m.role !== "assistant") return false;
-				const msg = m as AssistantMessage;
-				// Skip aborted messages with no content
-				if (msg.stopReason === "aborted" && msg.content.length === 0) return false;
-				return true;
-			});
+		const lastAssistant = this.agent.findLastMessage((message): message is AssistantMessage => {
+			if (message.role !== "assistant") return false;
+			// Skip aborted messages with no content.
+			return message.stopReason !== "aborted" || message.content.length > 0;
+		});
 
 		if (!lastAssistant) return undefined;
 
 		let text = "";
-		for (const content of (lastAssistant as AssistantMessage).content) {
+		for (const content of lastAssistant.content) {
 			if (content.type === "text") {
 				text += content.text;
 			}
