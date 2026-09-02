@@ -1683,6 +1683,12 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 	): void;
 
+	/** Start one exclusively correlated extension-owned turn in the current session. */
+	startTaskTurn(
+		content: string | (TextContent | ImageContent)[],
+		options?: { expandPromptTemplates?: boolean },
+	): TaskTurnHandle;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -2050,6 +2056,23 @@ export type SendUserMessageHandler = (
 	options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 ) => void;
 
+export interface TaskTurnResult {
+	readonly id: string;
+	readonly messages: readonly AgentMessage[];
+}
+
+export interface TaskTurnHandle {
+	readonly id: string;
+	readonly completed: Promise<TaskTurnResult>;
+	steer(text: string): Promise<void>;
+	followUp(text: string): Promise<void>;
+	abort(): Promise<void>;
+}
+
+export type StartTaskTurnHandler = (
+	content: string | (TextContent | ImageContent)[],
+	options?: { expandPromptTemplates?: boolean },
+) => TaskTurnHandle;
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type SetSessionNameHandler = (name: string) => void;
@@ -2126,6 +2149,7 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
+	startTaskTurn: StartTaskTurnHandler;
 	appendEntry: AppendEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;

@@ -226,6 +226,24 @@ describe("validated framed protocol APIs", () => {
 		expect(() => encodeServerMessage(serverHello, { maxFrameLength: 8 })).toThrow(ProtocolValidationError);
 	});
 
+	test("round-trips optional cross-client session lease modes", () => {
+		for (const request of [
+			{ command: "attach" as const, sessionId: "session-1" },
+			{ command: "attach" as const, sessionId: "session-1", mode: "exclusive" as const },
+		]) {
+			const message: ClientMessage = { type: "request", id: "lease", request };
+			const [payload] = new FrameDecoder().push(encodeClientMessage(message));
+			expect(parseClientMessage(decodeCbor(payload!))).toEqual(message);
+		}
+		expect(() =>
+			encodeClientMessage({
+				type: "request",
+				id: "lease",
+				request: { command: "attach", sessionId: "session-1", mode: "invalid" } as never,
+			}),
+		).toThrow(ProtocolValidationError);
+	});
+
 	test("incrementally decodes fragmented and coalesced client messages", () => {
 		const request: ClientMessage = {
 			type: "request",

@@ -375,6 +375,40 @@ describe("AgentSession prompt characterization", () => {
 		expect(getMessageText(harness.session.messages[1]!)).toBe("from extension");
 	});
 
+	it("startTaskTurn provides one correlated exclusive current-session handle", async () => {
+		let extensionApi: ExtensionAPI | undefined;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					extensionApi = pi;
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("task response")]);
+		const steer = vi.spyOn(harness.session, "steer").mockResolvedValue(undefined);
+		const followUp = vi.spyOn(harness.session, "followUp").mockResolvedValue(undefined);
+		const handle = extensionApi!.startTaskTurn("task prompt");
+		expect(handle.id).toMatch(/^task-turn-/);
+		expect(() => extensionApi!.startTaskTurn("interleaved")).toThrow("active task turn");
+		const steering = handle.steer("interrupt");
+		const following = handle.followUp("boundary");
+		const interleaved = harness.session.sendUserMessage("other extension");
+		const custom = harness.session.sendCustomMessage(
+			{ customType: "other", content: "other", display: true },
+			{ triggerTurn: true },
+		);
+		await Promise.all([steering, following]);
+		expect(steer).toHaveBeenCalledWith("interrupt");
+		expect(followUp).toHaveBeenCalledWith("boundary");
+		await expect(interleaved).rejects.toThrow("exclusively assigned");
+		await expect(custom).rejects.toThrow("exclusively assigned");
+		const result = await handle.completed;
+		expect(result.id).toBe(handle.id);
+		expect(result.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(getMessageText(result.messages[0]!)).toBe("task prompt");
+	});
+
 	it("does not report streamingBehavior to input handlers while idle", async () => {
 		const inputEvents: InputEvent[] = [];
 		const harness = await createHarness({
