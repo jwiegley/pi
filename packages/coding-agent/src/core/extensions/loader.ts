@@ -33,6 +33,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
+	ToolRendererWrapper,
 } from "./types.ts";
 
 const require = createRequire(import.meta.url);
@@ -297,6 +298,13 @@ function createExtensionAPI(
 				definition: tool,
 				sourceInfo: extension.sourceInfo,
 			});
+			runtime.refreshTools();
+		},
+
+		registerToolRenderer(wrapper: ToolRendererWrapper): void {
+			assertActive();
+			if (typeof wrapper !== "function") throw new TypeError("registerToolRenderer expects a function");
+			extension.toolRenderers.push(wrapper);
 			runtime.refreshTools();
 		},
 
@@ -588,6 +596,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		sourceInfo: createSyntheticSourceInfo(extensionPath, { source, baseDir }),
 		handlers: new Map(),
 		tools: new Map(),
+		toolRenderers: [],
 		messageRenderers: new Map(),
 		entryRenderers: new Map(),
 		commands: new Map(),

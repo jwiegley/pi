@@ -428,41 +428,72 @@ describe("ExtensionRunner", () => {
 			]);
 		});
 
-		it("keeps first tool when two extensions register the same name", async () => {
-			const first = `
-				import { Type } from "typebox";
-				export default function(pi) {
-					pi.registerTool({
-						name: "shared",
-						label: "shared",
-						description: "first",
-						parameters: Type.Object({}),
-						execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
-					});
-				}
-			`;
-			const second = `
-				import { Type } from "typebox";
-				export default function(pi) {
-					pi.registerTool({
-						name: "shared",
-						label: "shared",
-						description: "second",
-						parameters: Type.Object({}),
-						execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "a-first.ts"), first);
-			fs.writeFileSync(path.join(extensionsDir, "b-second.ts"), second);
+		it("loads renderer registrations without leaking them across reloads", async () => {
+			const registeringPath = path.join(extensionsDir, "register-renderer.ts");
+			const emptyPath = path.join(extensionsDir, "empty-renderer.ts");
+			fs.writeFileSync(
+				registeringPath,
+				`export default function(pi) {
+	if (pi.registerToolRenderer.length !== 1) throw new Error("wrong renderer ABI arity");
+	pi.registerToolRenderer((_tool, renderers) => renderers);
+}`,
+			);
+			fs.writeFileSync(emptyPath, "export default function() {}\n");
 
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const tools = runner.getAllRegisteredTools();
+			const first = await loadExtensions([registeringPath], tempDir);
+			expect(first.errors).toEqual([]);
+			expect(first.extensions[0]?.toolRenderers).toHaveLength(1);
 
-			expect(tools).toHaveLength(1);
-			expect(tools[0]?.definition.description).toBe("first");
+			const second = await loadExtensions([emptyPath], tempDir);
+			expect(second.errors).toEqual([]);
+			expect(second.extensions[0]?.toolRenderers).toEqual([]);
 		});
+
+		it("rejects non-function renderer registrations", async () => {
+			const extensionPath = path.join(extensionsDir, "invalid-renderer.ts");
+			fs.writeFileSync(extensionPath, "export default function(pi) { pi.registerToolRenderer(null); }\n");
+
+			const result = await loadExtensions([extensionPath], tempDir);
+
+			expect(result.extensions).toEqual([]);
+			expect(result.errors[0]?.error).toContain("registerToolRenderer expects a function");
+		});
+
+		it("keeps first tool when two extensions register the same name", async () => {
+		const first = `
+			import { Type } from "typebox";
+			export default function(pi) {
+				pi.registerTool({
+					name: "shared",
+					label: "shared",
+					description: "first",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+				});
+			}
+		`;
+		const second = `
+			import { Type } from "typebox";
+			export default function(pi) {
+				pi.registerTool({
+					name: "shared",
+					label: "shared",
+					description: "second",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+				});
+			}
+		`;
+		fs.writeFileSync(path.join(extensionsDir, "a-first.ts"), first);
+		fs.writeFileSync(path.join(extensionsDir, "b-second.ts"), second);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+		const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+		const tools = runner.getAllRegisteredTools();
+
+		expect(tools).toHaveLength(1);
+		expect(tools[0]?.definition.description).toBe("first");
+	});
 	});
 
 	describe("command collection", () => {

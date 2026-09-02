@@ -49,6 +49,26 @@ Use a single file for a small extension and a directory for a multi-file impleme
 
 Reload replaces the extension runtime, so code after `await ctx.reload()` must not reuse state from the old runtime. Only personal and explicit command-line extensions can participate in the `project_trust` event that runs before project extensions load.
 
+### Tool renderer wrappers
+
+`pi.registerToolRenderer(wrapper)` wraps the effective `renderShell`, `renderCall`, and `renderResult` slots for every tool. Wrappers run in extension load order and receive the output of earlier wrappers. A custom tool that replaces a built-in tool inherits any renderer slots it omits before wrappers run.
+
+The returned object may change renderer slots only. Tool execution, parameters, descriptions, prompt metadata, and active state remain unchanged. A throwing wrapper or invalid return is reported as an extension error; later wrappers still run.
+
+```typescript
+pi.registerToolRenderer((tool, renderers) => {
+  if (tool.name !== "bash" || !renderers.renderResult) return renderers;
+
+  const renderResult = renderers.renderResult;
+  return {
+    ...renderers,
+    renderResult(result, options, theme, context) {
+      return renderResult(result, options, theme, context);
+    },
+  };
+});
+```
+
 For session history, use `ctx.sessionManager.getEntriesPage()`, `getTreePage()`, targeted lookups, or iterators. `getEntries()` and `getTree()` are deprecated compatibility APIs that materialize complete history.
 
 <a id="understand-the-lifecycle"></a>

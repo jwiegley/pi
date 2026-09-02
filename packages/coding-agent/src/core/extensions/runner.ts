@@ -25,6 +25,7 @@ import {
 	normalizeBuildSystemPromptOptions,
 } from "../system-prompt.ts";
 import type { VirtualModelDefinition } from "../virtual-models.ts";
+import { applyToolRendererWrappers } from "./tool-renderers.ts";
 import type {
 	AgentBeforeSettleEvent,
 	BeforeAgentStartEvent,
@@ -82,6 +83,7 @@ import type {
 	SessionShutdownEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
+	ToolDefinition,
 	ToolResultEvent,
 	ToolResultEventResult,
 	TurnEndEvent,
@@ -648,6 +650,12 @@ export class ExtensionRunner {
 			}
 		}
 		return undefined;
+	}
+
+	applyToolRenderers<T extends ToolDefinition>(definition: T, inheritedDefinition?: ToolDefinition): T {
+		return applyToolRendererWrappers(this.extensions, definition, inheritedDefinition, (error) =>
+			this.emitError(error),
+		);
 	}
 
 	getFlags(): Map<string, ExtensionFlag> {
