@@ -228,14 +228,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	let thinkingLevel = options.thinkingLevel;
 
-	// If session has data, restore thinking level from it
-	if (thinkingLevel === undefined && hasExistingSession) {
-		thinkingLevel = hasThinkingEntry
-			? (existingSession.thinkingLevel as ThinkingLevel)
-			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
+	// If session has data, restore its explicit thinking level.
+	if (thinkingLevel === undefined && hasExistingSession && hasThinkingEntry) {
+		thinkingLevel = existingSession.thinkingLevel as ThinkingLevel;
 	}
 
-	// Fall back to per-model override, then global default
+	// Fall back to user per-model, global, model-local, then built-in defaults.
 	if (thinkingLevel === undefined && model) {
 		const perModel = settingsManager.getModelThinkingLevel(model.provider, model.id);
 		if (perModel) {
@@ -243,7 +241,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 	if (thinkingLevel === undefined) {
-		thinkingLevel = settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+		thinkingLevel =
+			settingsManager.getDefaultThinkingLevel() ?? model?.defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL;
 	}
 
 	// Clamp to model capabilities

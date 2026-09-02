@@ -526,7 +526,8 @@ function buildSessionOptions(
 
 	// Scoped models for Ctrl+P cycling
 	// Keep thinking level undefined when not explicitly set in the model pattern.
-	// Undefined means "inherit current session thinking level" during cycling.
+	// Undefined delegates to model-switch precedence: preserve reasoning state, otherwise use
+	// the global, model-local, then built-in default.
 	if (scopedModels.length > 0) {
 		options.scopedModels = scopedModels.map((sm) => ({
 			model: sm.model,

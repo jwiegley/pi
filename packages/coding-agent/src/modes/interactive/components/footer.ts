@@ -48,7 +48,7 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
  */
 export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
-	private session: AgentSession;
+	private session: AgentSession | undefined;
 	private footerData: ReadonlyFooterDataProvider;
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
@@ -56,8 +56,16 @@ export class FooterComponent implements Component {
 		this.footerData = footerData;
 	}
 
-	setSession(session: AgentSession): void {
+	bindSession(session: AgentSession): void {
 		this.session = session;
+	}
+
+	setSession(session: AgentSession): void {
+		this.bindSession(session);
+	}
+
+	detachSession(): void {
+		this.session = undefined;
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -81,22 +89,28 @@ export class FooterComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		const state = this.session.state;
+		// Session replacement closes the outgoing indexed history store. Capture
+		// the binding exactly once so a deferred render can neither observe a
+		// detached footer nor mix two sessions if a replacement binds mid-render.
+		const session = this.session;
+		if (!session) return [];
+
+		const state = session.state;
 
 		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		const historySummary = this.session.sessionManager.getHistorySummary();
+		const historySummary = session.sessionManager.getHistorySummary();
 		const usageTotals = historySummary.usage;
 		const latestCacheHitRate = historySummary.latestCacheHitRate;
 
 		// Calculate context usage from session (handles compaction correctly).
 		// After compaction, tokens are unknown until the next LLM response.
-		const contextUsage = this.session.getContextUsage();
+		const contextUsage = session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
 
 		// Replace home directory with ~
-		let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
+		let pwd = formatCwdForFooter(session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
 
 		// Add git branch if available
 		const branch = this.footerData.getGitBranch();
@@ -105,7 +119,7 @@ export class FooterComponent implements Component {
 		}
 
 		// Add session name if set
-		const sessionName = this.session.sessionManager.getSessionName();
+		const sessionName = session.sessionManager.getSessionName();
 		if (sessionName) {
 			pwd = `${pwd} • ${sessionName}`;
 		}
@@ -122,7 +136,7 @@ export class FooterComponent implements Component {
 
 		// Kimi Coding is subscription-backed despite using API-key authentication.
 		const usingSubscription = state.model
-			? state.model.provider === "kimi-coding" || this.session.modelRuntime.isUsingSubscription(state.model.provider)
+			? state.model.provider === "kimi-coding" || session.modelRuntime.isUsingSubscription(state.model.provider)
 			: false;
 		if (usageTotals.cost || usingSubscription) {
 			const costStr = `$${usageTotals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
