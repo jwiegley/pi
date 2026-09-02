@@ -313,15 +313,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
+			const providerTransportOptions = modelRuntime.getProviderTransportOptions(model.provider);
 			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 			// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
 			// Use max int32 to effectively disable the timeout.
 			const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
-			const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
+			const timeoutMs =
+				options?.timeoutMs ??
+				providerTransportOptions.timeoutMs ??
+				providerRetrySettings.timeoutMs ??
+				effectiveTimeoutMs;
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
 			const headerRunner = extensionRunnerRef.current;
 			return modelRuntime.streamSimple(model, context, {
+				...providerTransportOptions,
 				...options,
 				timeoutMs,
 				websocketConnectTimeoutMs,
