@@ -567,6 +567,113 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("context emission", () => {
+		it("returns the original message array when there are no handlers", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const messages = [{ role: "user" as const, content: "hello", timestamp: 1 }];
+
+			expect(await runner.emitContext(messages)).toBe(messages);
+		});
+
+		it("passes handlers a detached, cloneable ordinary array", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", async (event) => {
+						const messages = structuredClone(event.messages);
+						messages[0].content = "handled";
+						return { messages };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "context-clone.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(error.error));
+			const message = { role: "user" as const, content: "original", timestamp: 1 };
+			const messages = [message];
+
+			const emitted = await runner.emitContext(messages);
+
+			expect(errors).toEqual([]);
+			expect(emitted).toEqual([{ role: "user", content: "handled", timestamp: 1 }]);
+			expect(emitted).not.toBe(messages);
+			expect(emitted[0]).not.toBe(message);
+			expect(Array.isArray(emitted)).toBe(true);
+			expect(message.content).toBe("original");
+		});
+
+		it("runs a large indexed mixed context through the real handler boundary", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", async (event) => ({ messages: structuredClone(event.messages) }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "context-indexed.ts"), extCode);
+			const sessionPath = path.join(tempDir, "large-session.jsonl");
+			const lines = [
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "large-context",
+					timestamp: "2026-01-01T00:00:00.000Z",
+					cwd: tempDir,
+				}),
+			];
+			let parentId: string | null = null;
+			lines.push(
+				JSON.stringify({
+					type: "model_change",
+					id: "model",
+					parentId,
+					timestamp: "2026-01-01T00:00:00.001Z",
+					provider: "test",
+					modelId: "test",
+				}),
+			);
+			parentId = "model";
+			for (let index = 0; index < 9000; index++) {
+				const id = `message-${index}`;
+				lines.push(
+					JSON.stringify({
+						type: "message",
+						id,
+						parentId,
+						timestamp: new Date(index + 2).toISOString(),
+						message: { role: "user", content: `content-${index}`, timestamp: index },
+					}),
+				);
+				parentId = id;
+			}
+			fs.writeFileSync(sessionPath, `${lines.join("\n")}\n`);
+
+			const indexedManager = SessionManager.open(sessionPath);
+			try {
+				const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir,
+					indexedManager,
+					modelRegistry,
+				);
+				const errors: string[] = [];
+				runner.onError((error) => errors.push(error.error));
+
+				const emitted = await runner.emitContext(indexedManager.buildSessionContext().messages);
+
+				expect(errors).toEqual([]);
+				expect(emitted).toHaveLength(9000);
+				expect(emitted[0]).toMatchObject({ role: "user", content: "content-0" });
+				expect(emitted.at(-1)).toMatchObject({ role: "user", content: "content-8999" });
+			} finally {
+				indexedManager.close();
+			}
+		});
+	});
+
 	describe("error handling", () => {
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `

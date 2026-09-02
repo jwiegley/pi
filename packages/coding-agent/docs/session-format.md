@@ -418,7 +418,8 @@ Key methods for working with sessions programmatically.
 - `getLeafEntry()` - Get current leaf entry
 - `getEntry(id)` - Get entry by ID
 - `getBranch(fromId?)` - Walk from entry to root
-- `getTree()` - Get full tree structure
+- `getTreePage(options?)` - Read bounded flat tree metadata with ordinal cursors
+- `getTree()` - **Deprecated/expensive:** materialize the full tree structure
 - `getChildren(parentId)` - Get direct children
 - `getLabel(id)` - Get label for entry
 - `branch(entryId)` - Move leaf to earlier entry
@@ -428,7 +429,8 @@ Key methods for working with sessions programmatically.
 ### Instance Methods - Context & Info
 - `buildContextEntries()` - Get active branch entries with compaction applied
 - `buildSessionContext()` - Get messages, thinkingLevel, and model for LLM
-- `getEntries()` - All entries (excluding header)
+- `getEntriesPage(options?)` - Read a bounded append-order page
+- `getEntries()` - **Deprecated/expensive:** materialize all entries (excluding header)
 - `getHeader()` - Session header metadata
 - `getSessionName()` - Get display name from latest session_info entry
 - `getCwd()` - Working directory
@@ -436,3 +438,9 @@ Key methods for working with sessions programmatically.
 - `getSessionId()` - Session UUID
 - `getSessionFile()` - Session file path (undefined for in-memory)
 - `isPersisted()` - Whether session is saved to disk
+
+`getTreePage()` accepts `afterOrdinal`, `beforeOrdinal`, `direction`, and `limit` (default 256, maximum
+4096). Cursors are exclusive. Forward pages use `afterOrdinal`; reverse pages use `beforeOrdinal` and
+contain the newest records while remaining chronological within each page. `nextOrdinal` is the cursor
+for the next page in that direction, or `null` at the end. Tree pages contain metadata only; fetch a
+specific payload with `getEntry(id)` when needed.

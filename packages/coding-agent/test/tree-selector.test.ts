@@ -273,6 +273,27 @@ describe("TreeSelectorComponent", () => {
 		});
 	});
 
+	describe("truncation notice", () => {
+		test("renders the notice when provided", () => {
+			const notice = "Partial view: older entries are omitted.";
+			const tree = buildTree([userMessage("user-1", null, "hello")]);
+			const selector = new TreeSelectorComponent(
+				tree,
+				"user-1",
+				24,
+				() => {},
+				() => {},
+				undefined,
+				undefined,
+				undefined,
+				notice,
+			);
+
+			const plain = selector.render(100).map(stripVTControlCharacters).join("\n");
+			expect(plain).toContain(notice);
+		});
+	});
+
 	describe("copy", () => {
 		test("copies the full selected message with ctrl+x", () => {
 			const message = `${"long message ".repeat(30)}\nsecond line`;
@@ -284,14 +305,16 @@ describe("TreeSelectorComponent", () => {
 				() => {},
 				() => {},
 			);
+			let copiedEntryId: string | undefined;
 			let copied: string | undefined;
-			selector.onCopy = (text) => {
+			selector.onCopy = (entryId, text) => {
+				copiedEntryId = entryId;
 				copied = text;
 			};
 
 			selector.handleInput("\x18");
 
-			expect(copied).toBe(message);
+			expect({ entryId: copiedEntryId, text: copied }).toEqual({ entryId: "asst-1", text: message });
 		});
 	});
 
@@ -389,6 +412,163 @@ describe("TreeSelectorComponent", () => {
 			// Switch back to default with Ctrl+D
 			selector.handleInput("\x04"); // Ctrl+D
 			expect(list.getSelectedNode()?.entry.id).toBe("asst-1");
+		});
+	});
+
+	describe("paged navigation boundaries", () => {
+		const cases = [
+			{ name: "up", key: "\x1b[A", selectedId: "user-1", boundary: "older", legacyId: "user-2" },
+			{ name: "down", key: "\x1b[B", selectedId: "user-2", boundary: "newer", legacyId: "user-1" },
+			{ name: "page up", key: "\x1b[5~", selectedId: "user-1", boundary: "older", legacyId: "user-1" },
+			{ name: "page down", key: "\x1b[6~", selectedId: "user-2", boundary: "newer", legacyId: "user-2" },
+		] as const;
+		const interiorCases = [
+			{ name: "up", key: "\x1b[A", expectedId: "user-1" },
+			{ name: "down", key: "\x1b[B", expectedId: "user-2" },
+			{ name: "page up", key: "\x1b[5~", expectedId: "user-1" },
+			{ name: "page down", key: "\x1b[6~", expectedId: "user-2" },
+		] as const;
+
+		function createSelector(selectedId: string): TreeSelectorComponent {
+			return new TreeSelectorComponent(
+				buildTree([
+					userMessage("user-1", null, "first"),
+					assistantMessage("asst-1", "user-1", "middle"),
+					userMessage("user-2", "asst-1", "last"),
+				]),
+				"user-2",
+				24,
+				() => {},
+				() => {},
+				undefined,
+				selectedId,
+			);
+		}
+
+		test.each(cases)("consumes $name when the boundary callback returns true", ({ key, selectedId, boundary }) => {
+			const selector = createSelector(selectedId);
+			const boundaries: Array<"older" | "newer"> = [];
+			selector.onPageBoundary = (value) => {
+				boundaries.push(value);
+				return true;
+			};
+
+			selector.handleInput(key);
+
+			expect(boundaries).toEqual([boundary]);
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(selectedId);
+		});
+
+		test.each(cases)("preserves legacy $name behavior when the boundary callback returns false", (testCase) => {
+			const selector = createSelector(testCase.selectedId);
+			const boundaries: Array<"older" | "newer"> = [];
+			selector.onPageBoundary = (value) => {
+				boundaries.push(value);
+				return false;
+			};
+
+			selector.handleInput(testCase.key);
+
+			expect(boundaries).toEqual([testCase.boundary]);
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(testCase.legacyId);
+		});
+
+		test.each(cases)("keeps an empty filtered page stable on $name", ({ key, boundary }) => {
+			const selector = createSelector("user-1");
+			selector.handleInput("\x0c"); // labeled-only, with no labeled entries
+			const boundaries: Array<"older" | "newer"> = [];
+			selector.onPageBoundary = (value) => {
+				boundaries.push(value);
+				return false;
+			};
+
+			selector.handleInput(key);
+
+			expect(boundaries).toEqual([boundary]);
+			expect(selector.getTreeList().getSelectedNode()).toBeUndefined();
+		});
+
+		test.each(interiorCases)("does not request a page during interior $name navigation", ({ key, expectedId }) => {
+			const selector = createSelector("asst-1");
+			const boundaries: Array<"older" | "newer"> = [];
+			selector.onPageBoundary = (value) => {
+				boundaries.push(value);
+				return true;
+			};
+
+			selector.handleInput(key);
+
+			expect(boundaries).toEqual([]);
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe(expectedId);
+		});
+	});
+
+	describe("tree replacement", () => {
+		test("clears stale selection and uses visible requested IDs or directional fallbacks", () => {
+			const selector = new TreeSelectorComponent(
+				buildTree([
+					userMessage("old-root", null, "keep old root"),
+					assistantMessage("old-asst", "old-root", "keep old response"),
+					userMessage("shared", "old-asst", "keep old selection"),
+				]),
+				"shared",
+				24,
+				() => {},
+				() => {},
+			);
+			selector.handleInput("\x15"); // user-only
+			for (const character of "keep") selector.handleInput(character);
+
+			const replacement = buildTree([
+				userMessage("new-first", null, "keep first"),
+				assistantMessage("new-asst", "new-first", "keep filtered request"),
+				userMessage("shared", "new-asst", "keep last"),
+			]);
+
+			selector.replaceTree(replacement, "missing", "first");
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("new-first");
+
+			selector.replaceTree(replacement, "shared", "first");
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("shared");
+
+			selector.replaceTree(replacement, "new-asst", "first");
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("new-first");
+
+			selector.replaceTree(replacement, "missing");
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("shared");
+			expect(selector.getTreeList().getSearchQuery()).toBe("keep");
+			const rendered = selector.getTreeList().render(100).map(stripVTControlCharacters);
+			expect(rendered.join("\n")).toContain("[user]");
+			expect(rendered.find((line) => line.includes("keep first"))).toContain("•");
+		});
+
+		test("clears folds while preserving search mode", () => {
+			const selector = new TreeSelectorComponent(
+				buildTree([
+					userMessage("root", null, "keep root"),
+					assistantMessage("old-child", "root", "keep old child"),
+				]),
+				"old-child",
+				24,
+				() => {},
+				() => {},
+				undefined,
+				"root",
+			);
+			for (const character of "keep") selector.handleInput(character);
+			selector.handleInput("\x1b[1;5D"); // fold root
+
+			selector.replaceTree(
+				buildTree([
+					userMessage("root", null, "keep root"),
+					assistantMessage("new-child", "root", "keep new child"),
+				]),
+				"root",
+			);
+			selector.handleInput("\x1b[B");
+
+			expect(selector.getTreeList().getSearchQuery()).toBe("keep");
+			expect(selector.getTreeList().getSelectedNode()?.entry.id).toBe("new-child");
 		});
 	});
 

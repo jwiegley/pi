@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
 	Agent,
 	type AgentEvent,
+	type AgentMessageSource,
 	type AgentTool,
 	type AgentToolUpdateCallback,
 	type StreamFn,
@@ -476,6 +477,194 @@ describe("Agent", () => {
 		// Test clearMessages
 		agent.state.messages = [];
 		expect(agent.state.messages).toEqual([]);
+	});
+
+	it("keeps a deferred message prefix lazy for metadata and tail operations", () => {
+		const deferredMessage = { role: "user" as const, content: "deferred", timestamp: 1 };
+		let materializations = 0;
+		let lastReads = 0;
+		const source: AgentMessageSource = {
+			length: 1,
+			materialize: () => {
+				materializations++;
+				return [{ ...deferredMessage }];
+			},
+			last: () => {
+				lastReads++;
+				return deferredMessage;
+			},
+			iterateReverse: function* () {
+				yield deferredMessage;
+			},
+		};
+		const agent = new Agent({ streamFn: unusedStreamFunction });
+		agent.setMessageSource(source);
+
+		expect(agent.messageCount).toBe(1);
+		expect(agent.lastMessage).toBe(deferredMessage);
+		const appended = { role: "user" as const, content: "tail", timestamp: 2 };
+		agent.appendMessage(appended);
+		expect(agent.messageCount).toBe(2);
+		expect(agent.lastMessage).toBe(appended);
+		expect(agent.popMessage()).toBe(appended);
+		expect(agent.lastMessage).toBe(deferredMessage);
+		expect(materializations).toBe(0);
+		expect(lastReads).toBe(2);
+		agent.reset();
+		expect(agent.messageCount).toBe(0);
+		expect(materializations).toBe(0);
+	});
+
+	it("finds the last message by role across the tail and deferred prefix", () => {
+		const prefixUser = { role: "user" as const, content: "prefix user", timestamp: 1 };
+		const prefixAssistant = createAssistantMessage("prefix assistant");
+		let materializations = 0;
+		const lastRoles: Array<string | undefined> = [];
+		const agent = new Agent({ streamFn: unusedStreamFunction });
+		agent.setMessageSource({
+			length: 2,
+			materialize: () => {
+				materializations++;
+				return [{ ...prefixUser }, { ...prefixAssistant }];
+			},
+			last: (role) => {
+				lastRoles.push(role);
+				if (role === undefined || role === "assistant") return prefixAssistant;
+				if (role === "user") return prefixUser;
+				return undefined;
+			},
+			iterateReverse: function* () {
+				yield prefixAssistant;
+				yield prefixUser;
+			},
+		});
+		const tailUser = { role: "user" as const, content: "tail user", timestamp: 2 };
+		agent.appendMessage(tailUser);
+
+		expect(agent.lastMessage).toBe(tailUser);
+		expect(agent.findLastMessage("user")).toBe(tailUser);
+		expect(agent.findLastMessage("assistant")).toBe(prefixAssistant);
+		expect(lastRoles).toEqual(["assistant"]);
+		const tailAssistant = createAssistantMessage("tail assistant");
+		agent.appendMessage(tailAssistant);
+		expect(agent.findLastMessage("assistant")).toBe(tailAssistant);
+		expect(agent.findLastMessage((message) => message === prefixUser)).toBe(prefixUser);
+		expect([...agent.iterateMessagesReverse()]).toEqual([tailAssistant, tailUser, prefixAssistant, prefixUser]);
+		expect(agent.findLastMessage("toolResult")).toBeUndefined();
+		expect(lastRoles).toEqual(["assistant", "toolResult"]);
+		expect(materializations).toBe(0);
+	});
+
+	it("materializes and adopts a genuine live public messages array once", () => {
+		let materializations = 0;
+		const agent = new Agent({ streamFn: unusedStreamFunction });
+		agent.setMessageSource({
+			length: 1,
+			materialize: () => {
+				materializations++;
+				return [{ role: "user", content: [{ type: "text", text: "before" }], timestamp: 1 }];
+			},
+			last: () => ({ role: "user", content: "before", timestamp: 1 }),
+			iterateReverse: function* () {
+				yield { role: "user", content: "before", timestamp: 1 };
+			},
+		});
+
+		const messages = agent.state.messages;
+		expect(Array.isArray(messages)).toBe(true);
+		expect(agent.state.messages).toBe(messages);
+		expect(materializations).toBe(1);
+		const first = messages[0];
+		if (first?.role !== "user" || !Array.isArray(first.content)) throw new Error("Expected user text content");
+		first.content[0] = { type: "text", text: "after" };
+		expect(agent.state.messages[0]).toBe(first);
+		expect(agent.getMessagesSnapshot()[0]).toBe(first);
+		expect(materializations).toBe(1);
+	});
+
+	it("copies an assigned top-level messages array and drops its deferred source", () => {
+		let materializations = 0;
+		const agent = new Agent({ streamFn: unusedStreamFunction });
+		agent.setMessageSource({
+			length: 1,
+			materialize: () => {
+				materializations++;
+				return [{ role: "user", content: "old", timestamp: 1 }];
+			},
+			last: () => ({ role: "user", content: "old", timestamp: 1 }),
+			iterateReverse: function* () {
+				yield { role: "user", content: "old", timestamp: 1 };
+			},
+		});
+		const replacement = [{ role: "user" as const, content: "new", timestamp: 2 }];
+
+		agent.state.messages = replacement;
+		expect(agent.state.messages).not.toBe(replacement);
+		replacement.push({ role: "user", content: "caller mutation", timestamp: 3 });
+		expect(agent.messageCount).toBe(1);
+		expect(materializations).toBe(0);
+	});
+
+	it("returns transient real snapshots without adopting a deferred source", () => {
+		let materializations = 0;
+		const agent = new Agent({ streamFn: unusedStreamFunction });
+		agent.setMessageSource({
+			length: 1,
+			materialize: () => {
+				materializations++;
+				return [{ role: "user", content: "prefix", timestamp: 1 }];
+			},
+			last: () => ({ role: "user", content: "prefix", timestamp: 1 }),
+			iterateReverse: function* () {
+				yield { role: "user", content: "prefix", timestamp: 1 };
+			},
+		});
+		agent.appendMessage({ role: "user", content: "tail", timestamp: 2 });
+
+		const first = agent.getMessagesSnapshot();
+		expect(Array.isArray(first)).toBe(true);
+		expect(first.map((message) => (message.role === "user" ? message.content : undefined))).toEqual([
+			"prefix",
+			"tail",
+		]);
+		first.pop();
+		expect(agent.messageCount).toBe(2);
+		expect(agent.getMessagesSnapshot()).toHaveLength(2);
+		expect(materializations).toBe(2);
+		expect(agent.state.messages).toHaveLength(2);
+		expect(agent.state.messages).toBe(agent.state.messages);
+		expect(materializations).toBe(3);
+	});
+
+	it("passes providers a real snapshot without adopting the deferred source", async () => {
+		let materializations = 0;
+		let providerMessages: unknown;
+		const agent = new Agent({
+			streamFn: (_model, context) => {
+				providerMessages = context.messages;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
+				});
+				return stream;
+			},
+		});
+		agent.setMessageSource({
+			length: 1,
+			materialize: () => {
+				materializations++;
+				return [{ role: "user", content: "prefix", timestamp: 1 }];
+			},
+			last: () => ({ role: "user", content: "prefix", timestamp: 1 }),
+			iterateReverse: function* () {
+				yield { role: "user", content: "prefix", timestamp: 1 };
+			},
+		});
+
+		await agent.prompt("next");
+		expect(Array.isArray(providerMessages)).toBe(true);
+		expect(materializations).toBe(1);
+		expect(agent.messageCount).toBe(3);
 	});
 
 	it("should support steering message queue", async () => {

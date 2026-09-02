@@ -1,8 +1,9 @@
 import { setKeybindings } from "@earendil-works/pi-tui";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import type { SessionInfo } from "../src/core/session-manager.ts";
+import { type SessionInfo, SessionManager } from "../src/core/session-manager.ts";
 import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
+import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 async function flushPromises(): Promise<void> {
@@ -21,7 +22,9 @@ function makeSession(overrides: Partial<SessionInfo> & { id: string }): SessionI
 		modified: overrides.modified ?? new Date(0),
 		messageCount: overrides.messageCount ?? 1,
 		firstMessage: overrides.firstMessage ?? "hello",
+		firstMessageTruncated: overrides.firstMessageTruncated ?? false,
 		allMessagesText: overrides.allMessagesText ?? "hello",
+		allMessagesTextTruncated: overrides.allMessagesTextTruncated ?? false,
 	};
 }
 
@@ -36,6 +39,10 @@ describe("session selector rename", () => {
 	beforeEach(() => {
 		// Ensure test isolation: keybindings are a global singleton
 		setKeybindings(new KeybindingsManager());
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
 	});
 
 	it("shows rename hint in interactive /resume picker configuration", async () => {
@@ -107,5 +114,46 @@ describe("session selector rename", () => {
 
 		expect(renameSession).toHaveBeenCalledTimes(1);
 		expect(renameSession).toHaveBeenCalledWith(sessions[0]!.path, "XOld");
+	});
+
+	it("closes the temporary session manager when interactive rename fails", async () => {
+		const session = makeSession({ id: "a", name: "Old" });
+		vi.spyOn(SessionManager, "list").mockResolvedValue([session]);
+		vi.spyOn(SessionManager, "listAll").mockResolvedValue([session]);
+		const manager = {
+			appendSessionInfo: vi.fn(() => {
+				throw new Error("rename failed");
+			}),
+			close: vi.fn(),
+		} as unknown as SessionManager;
+		vi.spyOn(SessionManager, "open").mockReturnValue(manager);
+
+		let selector: SessionSelectorComponent | undefined;
+		const context = {
+			handleResumeSession: vi.fn(),
+			keybindings: new KeybindingsManager(),
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionDir: () => "/tmp",
+				getSessionFile: () => session.path,
+				usesDefaultSessionDir: () => false,
+			},
+			showSelector: (factory: (done: () => void) => { component: SessionSelectorComponent }) => {
+				selector = factory(() => {}).component;
+			},
+			shutdown: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		};
+		const showSessionSelector = Reflect.get(InteractiveMode.prototype, "showSessionSelector") as (
+			this: typeof context,
+		) => void;
+		showSessionSelector.call(context);
+		const renameSession = Reflect.get(selector!, "renameSession") as (
+			sessionPath: string,
+			nextName: string,
+		) => Promise<void>;
+
+		await expect(renameSession(session.path, "New")).rejects.toThrow("rename failed");
+		expect(manager.close).toHaveBeenCalledOnce();
 	});
 });

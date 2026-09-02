@@ -1,23 +1,31 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentMessageSource } from "@earendil-works/pi-agent-core";
 import { type ImageContent, type Message, type TextContent, type Usage, uuidv7 } from "@earendil-works/pi-ai";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import {
 	appendFileSync,
 	closeSync,
 	createReadStream,
 	existsSync,
+	fchmodSync,
+	fdatasyncSync,
+	fstatSync,
+	fsyncSync,
+	linkSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readSync,
+	renameSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
+	writeSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
-import { join, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
-import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
+import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
 	type BashExecutionMessage,
@@ -26,6 +34,22 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import {
+	acquireSourceLock,
+	createTreePreviewEntry,
+	type EntryMetadata,
+	type EntryPageOptions,
+	IndexedJsonlSessionHistoryStore,
+	type IterateEntriesOptions,
+	normalizeCursorPageOptions,
+	normalizeStoredAgentMessage,
+	type RecentActiveEntriesOptions,
+	type SessionEntryPage,
+	type SessionHistoryMetrics,
+	type SessionHistorySummary,
+	type SessionSourceIdentity,
+	type SessionSourceSnapshot,
+} from "./session-history-store.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -165,6 +189,90 @@ export interface SessionTreeNode {
 	labelTimestamp?: string;
 }
 
+/** Exclusive cursor options for bounded append-order history pages. */
+export interface CursorPageOptions {
+	afterOrdinal?: number;
+	beforeOrdinal?: number;
+	direction?: "forward" | "reverse";
+	limit?: number;
+}
+
+export interface SessionTreePageEntry {
+	ordinal: number;
+	messageOrdinal?: number;
+	id: string;
+	parentId: string | null;
+	type: SessionEntry["type"];
+	customType?: string;
+	messageRole?: string;
+	timestamp: string;
+	/** Resolved current label for this entry, if any. */
+	label?: string;
+	/** Timestamp of the latest label change for this entry, if any. */
+	labelTimestamp?: string;
+	/** Bounded display-only entry shape; hydrate by id before returning full content. */
+	entryPreview?: SessionEntry;
+}
+
+export interface SessionTreePage {
+	/** Entries are chronological within each page, including reverse pages. */
+	entries: SessionTreePageEntry[];
+	/** Exclusive cursor for the next page in the requested direction. */
+	nextOrdinal: number | null;
+}
+
+/** Internal deferred form of a session context. Public callers should use buildSessionContext(). */
+export interface SessionContextSource extends Pick<SessionContext, "thinkingLevel" | "model"> {
+	messages: AgentMessageSource;
+}
+
+/** Hydrate a bounded metadata page into a page-local forest for compatibility views. */
+export function buildSessionTreePage(
+	records: SessionTreePageEntry[],
+	getEntry: (id: string) => SessionEntry | undefined,
+): SessionTreeNode[] {
+	const nodeById = new Map<string, SessionTreeNode>();
+	const ordinalById = new Map<string, number>();
+	const roots: SessionTreeNode[] = [];
+
+	for (const record of records) {
+		const entry = record.entryPreview ?? getEntry(record.id);
+		if (!entry) continue;
+		nodeById.set(record.id, {
+			entry,
+			children: [],
+			label: record.label,
+			labelTimestamp: record.labelTimestamp,
+		});
+		ordinalById.set(record.id, record.ordinal);
+	}
+
+	for (const record of records) {
+		const node = nodeById.get(record.id);
+		if (!node) continue;
+		const parent = record.parentId ? nodeById.get(record.parentId) : undefined;
+		if (!parent || record.parentId === record.id) roots.push(node);
+		else parent.children.push(node);
+	}
+
+	const stack = [...roots];
+	while (stack.length > 0) {
+		const node = stack.pop()!;
+		node.children.sort((a, b) => {
+			const timestampOrder = new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime();
+			return timestampOrder || ordinalById.get(a.entry.id)! - ordinalById.get(b.entry.id)!;
+		});
+		stack.push(...node.children);
+	}
+	return roots;
+}
+
+export interface SessionTreePageOptions extends CursorPageOptions {
+	type?: string;
+	customType?: string;
+	messageRole?: string;
+}
+
 export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
@@ -184,7 +292,11 @@ export interface SessionInfo {
 	modified: Date;
 	messageCount: number;
 	firstMessage: string;
+	/** True when firstMessage is a 4 KiB UTF-8 prefix of the first user message. */
+	firstMessageTruncated?: boolean;
 	allMessagesText: string;
+	/** True when allMessagesText is a 64 KiB UTF-8 prefix of the searchable transcript. */
+	allMessagesTextTruncated?: boolean;
 }
 
 export type ReadonlySessionManager = Pick<
@@ -196,12 +308,28 @@ export type ReadonlySessionManager = Pick<
 	| "getLeafId"
 	| "getLeafEntry"
 	| "getEntry"
+	| "getEntryMetadata"
+	| "getMessageByOrdinal"
 	| "getLabel"
 	| "getBranch"
 	| "buildContextEntries"
+	| "getActiveContextEntries"
+	| "getActiveBranchMetadata"
+	| "getLatestActiveCompaction"
+	| "getLatestCustomEntry"
+	| "getLatestMessage"
+	| "getRecentActiveEntries"
+	| "iterateEntries"
+	| "iterateActiveAncestry"
+	| "getHistorySummary"
+	| "getHistoryMetrics"
+	| "hasThinkingLevelChange"
 	| "getHeader"
 	| "getEntries"
+	| "getEntriesPage"
+	| "iterateBranchEntries"
 	| "getTree"
+	| "getTreePage"
 	| "getSessionName"
 >;
 
@@ -227,31 +355,81 @@ function generateId(byId: { has(id: string): boolean }): string {
 	return randomUUID();
 }
 
-/** Migrate v1 → v2: add id/parentId tree structure. Mutates in place. */
+type LegacyCompactionEntry = CompactionEntry & { firstKeptEntryIndex?: unknown };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function sessionVersion(header: SessionHeader): number {
+	const version: unknown = header.version ?? 1;
+	if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) {
+		throw new Error(`Invalid session version: ${String(version)}`);
+	}
+	return version;
+}
+
+function legacyHeaderFingerprint(header: SessionHeader): string {
+	return createHash("sha256").update(JSON.stringify(header)).digest("hex");
+}
+
+/** The ordinal suffix makes uniqueness explicit without retaining an O(entry count) set. */
+function legacyEntryId(headerFingerprint: string, ordinal: number): string {
+	if (!Number.isSafeInteger(ordinal) || ordinal < 0) throw new Error(`Invalid legacy entry ordinal: ${ordinal}`);
+	return `v1-${headerFingerprint}-${ordinal.toString(36)}`;
+}
+
+function legacyFirstKeptOrdinal(entry: LegacyCompactionEntry): number {
+	if (!("firstKeptEntryIndex" in entry)) {
+		throw new Error("Legacy compaction is missing firstKeptEntryIndex");
+	}
+	const index = entry.firstKeptEntryIndex;
+	if (typeof index !== "number" || !Number.isSafeInteger(index) || index < 1) {
+		throw new Error(`Invalid firstKeptEntryIndex: ${String(index)}`);
+	}
+	return index - 1;
+}
+
+function normalizeLegacyMessageRole(entry: FileEntry): void {
+	if (entry.type !== "message") return;
+	const message = (entry as { message?: unknown }).message;
+	if (isRecord(message) && message.role === "hookMessage") message.role = "custom";
+}
+
+/** Migrate v1 → v2: add a deterministic linear id/parentId tree. Mutates in place. */
 function migrateV1ToV2(entries: FileEntry[]): void {
-	const ids = new Set<string>();
-	let prevId: string | null = null;
+	const header = entries[0];
+	if (!header || header.type !== "session") throw new Error("Session entries must start with a session header");
+	const fingerprint = legacyHeaderFingerprint(header);
+	const body = entries.slice(1);
 
-	for (const entry of entries) {
-		if (entry.type === "session") {
-			entry.version = 2;
-			continue;
+	for (let ordinal = 0; ordinal < body.length; ordinal++) {
+		const entry = body[ordinal];
+		if (entry.type === "session") throw new Error("Session entries contain multiple headers");
+		assertMigratableEntry(entry, 1, "session entries");
+		if (entry.type !== "compaction") continue;
+		const targetOrdinal = legacyFirstKeptOrdinal(entry as LegacyCompactionEntry);
+		if (targetOrdinal >= ordinal) {
+			throw new Error(
+				`firstKeptEntryIndex ${(entry as LegacyCompactionEntry).firstKeptEntryIndex} must precede compaction entry ${ordinal + 1}`,
+			);
 		}
+	}
 
-		entry.id = generateId(ids);
-		entry.parentId = prevId;
-		prevId = entry.id;
+	header.version = 2;
+	let previousId: string | null = null;
+	for (let ordinal = 0; ordinal < body.length; ordinal++) {
+		const entry = body[ordinal] as SessionEntry;
+		const id = legacyEntryId(fingerprint, ordinal);
+		entry.id = id;
+		entry.parentId = previousId;
+		previousId = id;
 
-		// Convert firstKeptEntryIndex to firstKeptEntryId for compaction
 		if (entry.type === "compaction") {
-			const comp = entry as CompactionEntry & { firstKeptEntryIndex?: number };
-			if (typeof comp.firstKeptEntryIndex === "number") {
-				const targetEntry = entries[comp.firstKeptEntryIndex];
-				if (targetEntry && targetEntry.type !== "session") {
-					comp.firstKeptEntryId = targetEntry.id;
-				}
-				delete comp.firstKeptEntryIndex;
-			}
+			const compaction = entry as LegacyCompactionEntry;
+			const targetOrdinal = legacyFirstKeptOrdinal(compaction);
+			compaction.firstKeptEntryId = legacyEntryId(fingerprint, targetOrdinal);
+			delete compaction.firstKeptEntryIndex;
 		}
 	}
 }
@@ -263,14 +441,8 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 			entry.version = 3;
 			continue;
 		}
-
-		// Update message entries with hookMessage role
-		if (entry.type === "message") {
-			const msgEntry = entry as SessionMessageEntry;
-			if (msgEntry.message && (msgEntry.message as { role: string }).role === "hookMessage") {
-				(msgEntry.message as { role: string }).role = "custom";
-			}
-		}
+		assertMigratableEntry(entry, 2, "session entries");
+		normalizeLegacyMessageRole(entry);
 	}
 }
 
@@ -279,8 +451,10 @@ function migrateV2ToV3(entries: FileEntry[]): void {
  * Mutates entries in place. Returns true if any migration was applied.
  */
 function migrateToCurrentVersion(entries: FileEntry[]): boolean {
-	const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
-	const version = header?.version ?? 1;
+	if (entries.length === 0) return false;
+	const header = entries[0];
+	if (header.type !== "session") throw new Error("Session entries must start with a session header");
+	const version = sessionVersion(header);
 
 	if (version >= CURRENT_SESSION_VERSION) return false;
 
@@ -301,13 +475,8 @@ export function parseSessionEntries(content: string): FileEntry[] {
 	const lines = content.trim().split("\n");
 
 	for (const line of lines) {
-		if (!line.trim()) continue;
-		try {
-			const entry = JSON.parse(line) as FileEntry;
-			entries.push(entry);
-		} catch {
-			// Skip malformed lines
-		}
+		const entry = parseSessionEntryLine(line);
+		if (entry) entries.push(entry);
 	}
 
 	return entries;
@@ -382,16 +551,9 @@ function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "
  */
 export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage[] {
 	if (entry.type === "message") {
-		const message = entry.message;
-		// Session files are parsed without validation; old versions, forks, or
-		// hand-edited files can contain messages with null/missing content.
-		if (
-			(message.role === "user" || message.role === "assistant" || message.role === "toolResult") &&
-			message.content == null
-		) {
-			return [{ ...message, content: [] }];
-		}
-		return [message];
+		// Session files are parsed without full validation; normalize compatibility
+		// shapes identically for retained and lazy projections.
+		return [normalizeStoredAgentMessage(entry.message)];
 	}
 	if (entry.type === "custom_message") {
 		return [
@@ -489,6 +651,9 @@ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultA
 }
 
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
+const MAX_SESSION_RECORD_BYTES = 64 * 1024 * 1024;
+const MAX_DEFERRED_BRANCH_ENTRIES = 8192;
+const MAX_DEFERRED_BRANCH_BYTES = 8 * 1024 * 1024;
 const SESSION_HEADER_READ_BUFFER_SIZE = 4096;
 /** Bound synchronous header discovery while allowing large cwd and custom metadata fields. */
 const MAX_SESSION_HEADER_SCAN_BYTES = 1024 * 1024;
@@ -503,7 +668,8 @@ class SessionHeaderScanLimitError extends Error {
 function parseSessionEntryLine(line: string): FileEntry | null {
 	if (!line.trim()) return null;
 	try {
-		return JSON.parse(line) as FileEntry;
+		const entry: unknown = JSON.parse(line);
+		return isRecord(entry) ? (entry as unknown as FileEntry) : null;
 	} catch {
 		// Skip malformed lines
 		return null;
@@ -613,6 +779,467 @@ function readSessionHeader(filePath: string): SessionHeader | null {
 	}
 }
 
+interface SourceSnapshot {
+	dev: string;
+	ino: string;
+	size: string;
+	mtimeNs: string;
+	ctimeNs: string;
+	permissions: number;
+}
+
+interface LegacyTransformResult {
+	entryCount: number;
+	headerFingerprint?: string;
+}
+
+function sourceSnapshot(filePath: string): SourceSnapshot {
+	const stats = statSync(filePath, { bigint: true });
+	return {
+		dev: stats.dev.toString(),
+		ino: stats.ino.toString(),
+		size: stats.size.toString(),
+		mtimeNs: stats.mtimeNs.toString(),
+		ctimeNs: stats.ctimeNs.toString(),
+		permissions: Number(stats.mode) & 0o7777,
+	};
+}
+
+function openFileSnapshot(fd: number): SourceSnapshot {
+	const stats = fstatSync(fd, { bigint: true });
+	return {
+		dev: stats.dev.toString(),
+		ino: stats.ino.toString(),
+		size: stats.size.toString(),
+		mtimeNs: stats.mtimeNs.toString(),
+		ctimeNs: stats.ctimeNs.toString(),
+		permissions: Number(stats.mode) & 0o7777,
+	};
+}
+
+function assertSourceSnapshot(expected: SourceSnapshot, actual: SourceSnapshot, filePath: string): void {
+	if (
+		expected.dev !== actual.dev ||
+		expected.ino !== actual.ino ||
+		expected.size !== actual.size ||
+		expected.mtimeNs !== actual.mtimeNs ||
+		expected.ctimeNs !== actual.ctimeNs ||
+		expected.permissions !== actual.permissions
+	) {
+		throw new Error(`Session source changed during migration: ${filePath}`);
+	}
+}
+
+function removeIfExists(filePath: string): void {
+	try {
+		unlinkSync(filePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+}
+
+function writeAllSync(fd: number, bytes: Uint8Array): void {
+	let offset = 0;
+	while (offset < bytes.length) {
+		const written = writeSync(fd, bytes, offset, bytes.length - offset);
+		if (written <= 0) throw new Error(`Unable to complete session write after ${offset} bytes`);
+		offset += written;
+	}
+}
+
+function writeJsonLineSync(fd: number, value: unknown): void {
+	writeAllSync(fd, sessionJsonLine(value));
+}
+
+function sessionJsonLine(value: unknown): Buffer {
+	const line = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+	if (line.length - 1 > MAX_SESSION_RECORD_BYTES) {
+		throw new Error(`Session record exceeds ${MAX_SESSION_RECORD_BYTES} bytes`);
+	}
+	return line;
+}
+
+function scanPhysicalLinesSync(fd: number, visitor: (bytes: Buffer, terminated: boolean) => void): void {
+	const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
+	let pendingParts: Buffer[] = [];
+	let pendingLength = 0;
+
+	while (true) {
+		const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+		if (bytesRead === 0) break;
+		const chunk = buffer.subarray(0, bytesRead);
+		let cursor = 0;
+		let newline = chunk.indexOf(0x0a, cursor);
+		while (newline !== -1) {
+			const tail = chunk.subarray(cursor, newline);
+			if (pendingLength + tail.length > MAX_SESSION_RECORD_BYTES) {
+				throw new Error(`Session record exceeds ${MAX_SESSION_RECORD_BYTES} bytes`);
+			}
+			let line = tail;
+			if (pendingLength > 0) {
+				pendingParts.push(tail);
+				line = Buffer.concat(pendingParts, pendingLength + tail.length);
+				pendingParts = [];
+				pendingLength = 0;
+			}
+			visitor(line, true);
+			cursor = newline + 1;
+			newline = chunk.indexOf(0x0a, cursor);
+		}
+		if (cursor < chunk.length) {
+			const tail = Buffer.from(chunk.subarray(cursor));
+			if (pendingLength + tail.length > MAX_SESSION_RECORD_BYTES) {
+				throw new Error(`Session record exceeds ${MAX_SESSION_RECORD_BYTES} bytes`);
+			}
+			pendingParts.push(tail);
+			pendingLength += tail.length;
+		}
+	}
+
+	if (pendingLength > 0) {
+		visitor(pendingParts.length === 1 ? pendingParts[0] : Buffer.concat(pendingParts, pendingLength), false);
+	}
+}
+
+function scanSessionBodySync(
+	fd: number,
+	filePath: string,
+	visitor: (bytes: Buffer, terminated: boolean) => void,
+): void {
+	let headerFound = false;
+	scanPhysicalLinesSync(fd, (bytes, terminated) => {
+		if (headerFound) {
+			visitor(bytes, terminated);
+			return;
+		}
+		const candidate = parseSessionHeaderCandidate(bytes.toString("utf8"));
+		if (candidate === undefined) return;
+		if (candidate === null) throw new Error(`Session file is not a valid pi session: ${filePath}`);
+		headerFound = true;
+	});
+	if (!headerFound) throw new Error(`Session file is not a valid pi session: ${filePath}`);
+}
+
+function assertMigratableEntry(entry: FileEntry, sourceVersion: number, filePath: string): void {
+	if (entry.type === "session") throw new Error(`Session file contains multiple headers: ${filePath}`);
+	if (
+		typeof (entry as { type?: unknown }).type !== "string" ||
+		typeof (entry as { timestamp?: unknown }).timestamp !== "string"
+	) {
+		throw new Error(`Session file contains an invalid legacy entry: ${filePath}`);
+	}
+	if (sourceVersion === 2) {
+		const candidate = entry as { id?: unknown; parentId?: unknown };
+		if (typeof candidate.id !== "string" || (candidate.parentId !== null && typeof candidate.parentId !== "string")) {
+			throw new Error(`Session file contains an invalid v2 entry: ${filePath}`);
+		}
+	}
+
+	let valid = true;
+	switch (entry.type) {
+		case "message": {
+			const message = (entry as { message?: unknown }).message;
+			valid = isRecord(message) && typeof message.role === "string";
+			break;
+		}
+		case "thinking_level_change":
+			valid = typeof (entry as { thinkingLevel?: unknown }).thinkingLevel === "string";
+			break;
+		case "model_change":
+			valid =
+				typeof (entry as { provider?: unknown }).provider === "string" &&
+				typeof (entry as { modelId?: unknown }).modelId === "string";
+			break;
+		case "compaction":
+			valid =
+				typeof (entry as { summary?: unknown }).summary === "string" &&
+				typeof (entry as { tokensBefore?: unknown }).tokensBefore === "number" &&
+				(sourceVersion === 1 || typeof (entry as { firstKeptEntryId?: unknown }).firstKeptEntryId === "string");
+			break;
+		case "branch_summary":
+			valid =
+				typeof (entry as { fromId?: unknown }).fromId === "string" &&
+				typeof (entry as { summary?: unknown }).summary === "string";
+			break;
+		case "custom":
+			valid = typeof (entry as { customType?: unknown }).customType === "string";
+			break;
+		case "custom_message": {
+			const custom = entry as { customType?: unknown; content?: unknown; display?: unknown };
+			valid =
+				typeof custom.customType === "string" &&
+				(custom.content == null || typeof custom.content === "string" || Array.isArray(custom.content)) &&
+				typeof custom.display === "boolean";
+			break;
+		}
+		case "label": {
+			const label = entry as { targetId?: unknown; label?: unknown };
+			valid = typeof label.targetId === "string" && (label.label === undefined || typeof label.label === "string");
+			break;
+		}
+		case "session_info": {
+			const name = (entry as { name?: unknown }).name;
+			valid = name === undefined || typeof name === "string";
+			break;
+		}
+	}
+	if (!valid) throw new Error(`Session file contains an invalid legacy entry: ${filePath}`);
+}
+
+function streamLegacyBodySync(
+	sourceFd: number,
+	destinationFd: number,
+	sourcePath: string,
+	header: SessionHeader,
+	sourceVersion: number,
+): LegacyTransformResult {
+	const fingerprint = sourceVersion === 1 ? legacyHeaderFingerprint(header) : undefined;
+	let entryCount = 0;
+	let previousId: string | null = null;
+	let furthestFirstKept: { index: number; targetOrdinal: number } | undefined;
+
+	scanSessionBodySync(sourceFd, sourcePath, (bytes) => {
+		const parsed = parseSessionEntryLine(bytes.toString("utf8"));
+		if (!parsed) return;
+		assertMigratableEntry(parsed, sourceVersion, sourcePath);
+		const entry = parsed as SessionEntry;
+
+		if (sourceVersion === 1) {
+			if (entryCount === Number.MAX_SAFE_INTEGER) throw new Error("Legacy session has too many entries");
+			entry.id = legacyEntryId(fingerprint!, entryCount);
+			entry.parentId = previousId;
+			previousId = entry.id;
+			if (entry.type === "compaction") {
+				const compaction = entry as LegacyCompactionEntry;
+				const targetOrdinal = legacyFirstKeptOrdinal(compaction);
+				if (targetOrdinal >= entryCount) {
+					throw new Error(
+						`firstKeptEntryIndex ${compaction.firstKeptEntryIndex} must precede compaction entry ${entryCount + 1}`,
+					);
+				}
+				compaction.firstKeptEntryId = legacyEntryId(fingerprint!, targetOrdinal);
+				delete compaction.firstKeptEntryIndex;
+				if (!furthestFirstKept || targetOrdinal > furthestFirstKept.targetOrdinal) {
+					furthestFirstKept = { index: targetOrdinal + 1, targetOrdinal };
+				}
+			}
+		}
+		normalizeLegacyMessageRole(entry);
+		writeJsonLineSync(destinationFd, entry);
+		entryCount++;
+	});
+
+	if (furthestFirstKept && furthestFirstKept.targetOrdinal >= entryCount) {
+		throw new Error(`firstKeptEntryIndex ${furthestFirstKept.index} is out of range for ${entryCount} entries`);
+	}
+	return { entryCount, headerFingerprint: fingerprint };
+}
+
+function copyCurrentSessionBodySync(sourceFd: number, destinationFd: number, sourcePath: string): void {
+	scanSessionBodySync(sourceFd, sourcePath, (bytes, terminated) => {
+		writeAllSync(destinationFd, bytes);
+		if (terminated) writeAllSync(destinationFd, Buffer.from("\n"));
+	});
+}
+
+function validateMigratedCandidate(
+	filePath: string,
+	expectedHeader: SessionHeader,
+	sourceVersion: number,
+	transform: LegacyTransformResult,
+): void {
+	const header = readSessionHeader(filePath);
+	if (
+		!header ||
+		JSON.stringify(header) !== JSON.stringify(expectedHeader) ||
+		sessionVersion(header) !== CURRENT_SESSION_VERSION
+	) {
+		throw new Error(`Migrated session failed header validation: ${filePath}`);
+	}
+
+	const fd = openSync(filePath, "r");
+	let ordinal = 0;
+	let previousId: string | null = null;
+	try {
+		scanSessionBodySync(fd, filePath, (bytes, terminated) => {
+			if (!terminated) throw new Error(`Migrated session has an unterminated record: ${filePath}`);
+			const parsed = parseSessionEntryLine(bytes.toString("utf8"));
+			if (!parsed) throw new Error(`Migrated session contains an invalid record: ${filePath}`);
+			assertMigratableEntry(parsed, 2, filePath);
+			const entry = parsed as SessionEntry;
+			if (sourceVersion === 1) {
+				const expectedId = legacyEntryId(transform.headerFingerprint!, ordinal);
+				if (entry.id !== expectedId || entry.parentId !== previousId) {
+					throw new Error(`Migrated v1 session failed ordinal validation: ${filePath}`);
+				}
+				previousId = expectedId;
+			}
+			if (entry.type === "message") {
+				const message = (entry as { message?: unknown }).message;
+				if (isRecord(message) && message.role === "hookMessage") {
+					throw new Error(`Migrated session retained hookMessage role: ${filePath}`);
+				}
+			}
+			if (entry.type === "compaction" && "firstKeptEntryIndex" in entry) {
+				throw new Error(`Migrated session retained firstKeptEntryIndex: ${filePath}`);
+			}
+			ordinal++;
+		});
+	} finally {
+		closeSync(fd);
+	}
+	if (ordinal !== transform.entryCount) throw new Error(`Migrated session entry count changed: ${filePath}`);
+}
+
+function createSiblingTempPath(destinationPath: string, purpose: string): string {
+	return join(dirname(destinationPath), `.${basename(destinationPath)}.${purpose}.${process.pid}.${randomUUID()}.tmp`);
+}
+
+function syncParentDirectory(filePath: string): void {
+	if (process.platform === "win32") return;
+	const fd = openSync(dirname(filePath), "r");
+	try {
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/** Atomically publish a same-directory candidate without replacing an existing destination. */
+function publishNoClobber(candidatePath: string, destinationPath: string): void {
+	try {
+		linkSync(candidatePath, destinationPath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+			throw new Error(`Session file already exists: ${destinationPath}`);
+		}
+		throw error;
+	}
+	try {
+		syncParentDirectory(destinationPath);
+		unlinkSync(candidatePath);
+		syncParentDirectory(destinationPath);
+	} catch (error) {
+		throw new Error(
+			`Session publication may exist at ${destinationPath}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+function migrateLegacySessionFile(filePath: string): void {
+	const release = acquireSourceLock(filePath);
+	let sourceFd: number | undefined;
+	let temporaryFd: number | undefined;
+	let temporaryPath: string | undefined;
+	try {
+		const snapshot = sourceSnapshot(filePath);
+		const header = readSessionHeader(filePath);
+		if (!header) throw new Error(`Session file is not a valid pi session: ${filePath}`);
+		const version = sessionVersion(header);
+		if (version >= CURRENT_SESSION_VERSION) return;
+		if (version !== 1 && version !== 2) throw new Error(`Unsupported legacy session version: ${version}`);
+
+		sourceFd = openSync(filePath, "r");
+		assertSourceSnapshot(snapshot, openFileSnapshot(sourceFd), filePath);
+		const candidatePath = createSiblingTempPath(filePath, "migrate");
+		temporaryFd = openSync(candidatePath, "wx", snapshot.permissions);
+		temporaryPath = candidatePath;
+
+		const migratedHeader = { ...header, version: CURRENT_SESSION_VERSION };
+		writeJsonLineSync(temporaryFd, migratedHeader);
+		const transform = streamLegacyBodySync(sourceFd, temporaryFd, filePath, header, version);
+		fchmodSync(temporaryFd, snapshot.permissions);
+		fdatasyncSync(temporaryFd);
+		closeSync(temporaryFd);
+		temporaryFd = undefined;
+		validateMigratedCandidate(temporaryPath, migratedHeader, version, transform);
+		assertSourceSnapshot(snapshot, openFileSnapshot(sourceFd), filePath);
+		assertSourceSnapshot(snapshot, sourceSnapshot(filePath), filePath);
+		closeSync(sourceFd);
+		sourceFd = undefined;
+		assertSourceSnapshot(snapshot, sourceSnapshot(filePath), filePath);
+		renameSync(temporaryPath, filePath);
+		temporaryPath = undefined;
+		syncParentDirectory(filePath);
+	} finally {
+		try {
+			if (temporaryFd !== undefined) closeSync(temporaryFd);
+		} finally {
+			try {
+				if (sourceFd !== undefined) closeSync(sourceFd);
+			} finally {
+				try {
+					if (temporaryPath !== undefined) removeIfExists(temporaryPath);
+				} finally {
+					release();
+				}
+			}
+		}
+	}
+}
+
+function publishForkedSession(sourcePath: string, destinationPath: string, destinationHeader: SessionHeader): void {
+	const release = acquireSourceLock(sourcePath);
+	let sourceFd: number | undefined;
+	let temporaryFd: number | undefined;
+	let temporaryPath: string | undefined;
+	try {
+		const snapshot = sourceSnapshot(sourcePath);
+		const sourceHeader = readSessionHeader(sourcePath);
+		if (!sourceHeader) throw new Error(`Cannot fork: source session has no header: ${sourcePath}`);
+		const version = sessionVersion(sourceHeader);
+		if (version < CURRENT_SESSION_VERSION && version !== 1 && version !== 2) {
+			throw new Error(`Unsupported legacy session version: ${version}`);
+		}
+
+		sourceFd = openSync(sourcePath, "r");
+		assertSourceSnapshot(snapshot, openFileSnapshot(sourceFd), sourcePath);
+		const candidatePath = createSiblingTempPath(destinationPath, "fork");
+		temporaryFd = openSync(candidatePath, "wx", 0o600);
+		temporaryPath = candidatePath;
+		writeJsonLineSync(temporaryFd, destinationHeader);
+
+		let transform: LegacyTransformResult | undefined;
+		if (version < CURRENT_SESSION_VERSION) {
+			transform = streamLegacyBodySync(sourceFd, temporaryFd, sourcePath, sourceHeader, version);
+		} else {
+			copyCurrentSessionBodySync(sourceFd, temporaryFd, sourcePath);
+		}
+		fchmodSync(temporaryFd, 0o600);
+		fdatasyncSync(temporaryFd);
+		closeSync(temporaryFd);
+		temporaryFd = undefined;
+		if (transform) validateMigratedCandidate(temporaryPath, destinationHeader, version, transform);
+		else {
+			const actualHeader = readSessionHeader(temporaryPath);
+			if (!actualHeader || JSON.stringify(actualHeader) !== JSON.stringify(destinationHeader)) {
+				throw new Error(`Forked session failed header validation: ${temporaryPath}`);
+			}
+		}
+		assertSourceSnapshot(snapshot, openFileSnapshot(sourceFd), sourcePath);
+		assertSourceSnapshot(snapshot, sourceSnapshot(sourcePath), sourcePath);
+		closeSync(sourceFd);
+		sourceFd = undefined;
+		assertSourceSnapshot(snapshot, sourceSnapshot(sourcePath), sourcePath);
+		publishNoClobber(temporaryPath, destinationPath);
+		temporaryPath = undefined;
+	} finally {
+		try {
+			if (temporaryFd !== undefined) closeSync(temporaryFd);
+		} finally {
+			try {
+				if (sourceFd !== undefined) closeSync(sourceFd);
+			} finally {
+				try {
+					if (temporaryPath !== undefined) removeIfExists(temporaryPath);
+				} finally {
+					release();
+				}
+			}
+		}
+	}
+}
+
 function readSessionHeaderForDiscovery(filePath: string): SessionHeader | null {
 	try {
 		return readSessionHeader(filePath);
@@ -685,13 +1312,19 @@ function getMessageActivityTime(entry: SessionMessageEntry): number | undefined 
 	return Number.isNaN(t) ? undefined : t;
 }
 
+const MAX_SESSION_FIRST_MESSAGE_BYTES = 4 * 1024;
+const MAX_SESSION_SEARCH_TEXT_BYTES = 64 * 1024;
+
 async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	try {
 		const stats = await stat(filePath);
 		let header: SessionHeader | null = null;
 		let messageCount = 0;
 		let firstMessage = "";
-		const allMessages: string[] = [];
+		let firstMessageTruncated = false;
+		const allMessagesTextBuffer = Buffer.allocUnsafe(MAX_SESSION_SEARCH_TEXT_BYTES);
+		let allMessagesTextBytes = 0;
+		let allMessagesTextTruncated = false;
 		let name: string | undefined;
 		let lastActivityTime: number | undefined;
 
@@ -730,9 +1363,36 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 			const textContent = extractTextContent(message);
 			if (!textContent) continue;
 
-			allMessages.push(textContent);
+			if (!allMessagesTextTruncated) {
+				if (allMessagesTextBytes > 0) {
+					if (allMessagesTextBytes === MAX_SESSION_SEARCH_TEXT_BYTES) {
+						allMessagesTextTruncated = true;
+					} else {
+						allMessagesTextBuffer[allMessagesTextBytes++] = 0x20;
+					}
+				}
+				if (!allMessagesTextTruncated) {
+					const textBytes = Buffer.byteLength(textContent);
+					const bytesWritten = allMessagesTextBuffer.write(
+						textContent,
+						allMessagesTextBytes,
+						MAX_SESSION_SEARCH_TEXT_BYTES - allMessagesTextBytes,
+						"utf8",
+					);
+					allMessagesTextBytes += bytesWritten;
+					allMessagesTextTruncated = bytesWritten < textBytes;
+				}
+			}
 			if (!firstMessage && message.role === "user") {
-				firstMessage = textContent;
+				const firstMessageBytes = Buffer.byteLength(textContent);
+				firstMessageTruncated = firstMessageBytes > MAX_SESSION_FIRST_MESSAGE_BYTES;
+				if (firstMessageTruncated) {
+					const buffer = Buffer.allocUnsafe(MAX_SESSION_FIRST_MESSAGE_BYTES);
+					const bytesWritten = buffer.write(textContent, 0, buffer.length, "utf8");
+					firstMessage = buffer.toString("utf8", 0, bytesWritten);
+				} else {
+					firstMessage = textContent;
+				}
 			}
 		}
 
@@ -758,7 +1418,9 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 			modified,
 			messageCount,
 			firstMessage: firstMessage || "(no messages)",
-			allMessagesText: allMessages.join(" "),
+			firstMessageTruncated,
+			allMessagesText: allMessagesTextBuffer.toString("utf8", 0, allMessagesTextBytes),
+			allMessagesTextTruncated,
 		};
 	} catch {
 		return null;
@@ -862,6 +1524,7 @@ export class SessionManager {
 	private flushed: boolean = false;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
+	private historyStore: IndexedJsonlSessionHistoryStore | undefined;
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
@@ -872,7 +1535,6 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
-		preloadedFileEntries?: FileEntry[],
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
@@ -882,7 +1544,7 @@ export class SessionManager {
 		}
 
 		if (sessionFile) {
-			this._setSessionFile(sessionFile, preloadedFileEntries);
+			this._setSessionFile(sessionFile);
 		} else if (preloadedFileEntries?.length) {
 			this._loadEntries(preloadedFileEntries, newSessionOptions);
 		} else {
@@ -895,18 +1557,13 @@ export class SessionManager {
 		this._setSessionFile(sessionFile);
 	}
 
-	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
+	private _setSessionFile(sessionFile: string): void {
+		this.historyStore?.close();
+		this.historyStore = undefined;
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
-			const entries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
-
-			// If file was empty, initialize it with a valid session header. If it was
-			// non-empty but did not parse as a pi session, fail without modifying it.
-			if (entries.length === 0) {
+			if (statSync(this.sessionFile).size === 0) {
 				const explicitPath = this.sessionFile;
-				if (statSync(explicitPath).size > 0) {
-					throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
-				}
 				this.newSession();
 				this.sessionFile = explicitPath;
 				this._rewriteFile();
@@ -914,8 +1571,20 @@ export class SessionManager {
 				return;
 			}
 
-			this._loadEntries(entries);
+			const boundedHeader = readSessionHeader(this.sessionFile);
+			if (!boundedHeader) throw new Error(`Session file is not a valid pi session: ${this.sessionFile}`);
+			if (sessionVersion(boundedHeader) < CURRENT_SESSION_VERSION) migrateLegacySessionFile(this.sessionFile);
+
+			// migrateLegacySessionFile releases the source lock before this store takes it.
+			this.historyStore = IndexedJsonlSessionHistoryStore.open(this.sessionFile);
+			this.sessionId = this.historyStore.header.id;
+			this.fileEntries = [];
+			this.byId.clear();
+			this.labelsById.clear();
+			this.labelTimestampsById.clear();
+			this.leafId = this.historyStore.leafId;
 			this.flushed = true;
+			return;
 		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
@@ -924,6 +1593,8 @@ export class SessionManager {
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
+		this.historyStore?.close();
+		this.historyStore = undefined;
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
@@ -992,13 +1663,23 @@ export class SessionManager {
 
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
+		const historyStore = this.historyStore;
+		const volatileLeafId = historyStore?.leafId;
+		const entries = historyStore ? [historyStore.header, ...historyStore.getEntries()] : this.fileEntries;
+		historyStore?.close();
+		this.historyStore = undefined;
 		const fd = openSync(this.sessionFile, "w");
 		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+			for (const entry of entries) {
+				writeFileSync(fd, sessionJsonLine(entry));
 			}
 		} finally {
 			closeSync(fd);
+		}
+		if (historyStore) {
+			this.historyStore = IndexedJsonlSessionHistoryStore.open(this.sessionFile);
+			this.historyStore.setVolatileLeaf(volatileLeafId ?? null);
+			this.leafId = this.historyStore.leafId;
 		}
 	}
 
@@ -1028,11 +1709,15 @@ export class SessionManager {
 
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
+		if (this.historyStore) {
+			this.historyStore.append(entry);
+			return;
+		}
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
 			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				appendFileSync(this.sessionFile, sessionJsonLine(entry));
 			} else {
 				// Mark as not flushed so when assistant arrives, all entries get written
 				this.flushed = false;
@@ -1044,22 +1729,45 @@ export class SessionManager {
 			const fd = openSync(this.sessionFile, "wx");
 			try {
 				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
+					writeFileSync(fd, sessionJsonLine(e));
 				}
 			} finally {
 				closeSync(fd);
 			}
 			this.flushed = true;
+			this.historyStore = IndexedJsonlSessionHistoryStore.open(this.sessionFile);
+			this.fileEntries = [];
+			this.byId.clear();
+			this.labelsById.clear();
+			this.labelTimestampsById.clear();
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			appendFileSync(this.sessionFile, sessionJsonLine(entry));
+			this.historyStore = IndexedJsonlSessionHistoryStore.open(this.sessionFile);
+			this.fileEntries = [];
+			this.byId.clear();
+			this.labelsById.clear();
+			this.labelTimestampsById.clear();
 		}
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
+		if (this.historyStore) {
+			this.historyStore.append(entry);
+			this.leafId = entry.id;
+			return;
+		}
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
 		this._persist(entry);
+	}
+
+	private _entryIds(): { has(id: string): boolean } {
+		return this.historyStore ?? this.byId;
+	}
+
+	private _hasEntry(id: string): boolean {
+		return this.historyStore?.has(id) ?? this.byId.has(id);
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1071,7 +1779,7 @@ export class SessionManager {
 	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
 		const entry: SessionMessageEntry = {
 			type: "message",
-			id: generateId(this.byId),
+			id: generateId(this._entryIds()),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			message,
@@ -1084,7 +1792,7 @@ export class SessionManager {
 	appendThinkingLevelChange(thinkingLevel: string): string {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
-			id: generateId(this.byId),
+			id: generateId(this._entryIds()),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			thinkingLevel,
@@ -1097,7 +1805,7 @@ export class SessionManager {
 	appendModelChange(provider: string, modelId: string): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
-			id: generateId(this.byId),
+			id: generateId(this._entryIds()),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			provider,
@@ -1118,7 +1826,7 @@ export class SessionManager {
 	): string {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
-			id: generateId(this.byId),
+			id: generateId(this._entryIds()),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			summary,
@@ -1138,7 +1846,7 @@ export class SessionManager {
 			type: "custom",
 			customType,
 			data,
-			id: generateId(this.byId),
+			id: generateId(this._entryIds()),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
@@ -1151,7 +1859,7 @@ export class SessionManager {
 		const sanitizedName = name.replace(/[\r\n]+/g, " ").trim();
 		const entry: SessionInfoEntry = {
 			type: "session_info",
-			id: generateId(this.byId),
+			id: generateId(this._entryIds()),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			name: sanitizedName,
@@ -1162,6 +1870,7 @@ export class SessionManager {
 
 	/** Get the current session name from the latest session_info entry, if any. */
 	getSessionName(): string | undefined {
+		if (this.historyStore) return this.historyStore.getSessionName();
 		// Walk entries in reverse to find the latest session_info entry.
 		// Empty names explicitly clear the session title.
 		const entries = this.getEntries();
@@ -1194,7 +1903,7 @@ export class SessionManager {
 			content,
 			display,
 			details,
-			id: generateId(this.byId),
+			id: generateId(this._entryIds()),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
@@ -1211,17 +1920,57 @@ export class SessionManager {
 	}
 
 	getLeafEntry(): SessionEntry | undefined {
-		return this.leafId ? this.byId.get(this.leafId) : undefined;
+		return this.leafId ? this.getEntry(this.leafId) : undefined;
 	}
 
 	getEntry(id: string): SessionEntry | undefined {
-		return this.byId.get(id);
+		return this.historyStore?.getEntry(id) ?? this.byId.get(id);
+	}
+
+	/** Index metadata for an entry without hydrating its payload. */
+	getEntryMetadata(id: string): EntryMetadata | undefined {
+		if (this.historyStore) return this.historyStore.getEntryMetadata(id);
+		let messageOrdinal = 0;
+		let entryOrdinal = 0;
+		for (const entry of this.fileEntries) {
+			if (entry.type === "session") continue;
+			const currentEntryOrdinal = entryOrdinal++;
+			const currentMessageOrdinal = entry.type === "message" ? messageOrdinal++ : undefined;
+			if (entry.id !== id) continue;
+			return {
+				ordinal: currentEntryOrdinal,
+				messageOrdinal: currentMessageOrdinal,
+				id: entry.id,
+				parentId: entry.parentId,
+				type: entry.type,
+				customType: entry.type === "custom" || entry.type === "custom_message" ? entry.customType : undefined,
+				timestamp: entry.timestamp,
+				offset: 0,
+				length: Buffer.byteLength(JSON.stringify(entry)),
+				effectiveThinkingLevel: "off",
+				hasThinkingLevelChange: false,
+			};
+		}
+		return undefined;
+	}
+
+	/** Message entry by its stable zero-based transcript ordinal. */
+	getMessageByOrdinal(messageOrdinal: number): SessionEntry | undefined {
+		if (this.historyStore) return this.historyStore.getMessageByOrdinal(messageOrdinal);
+		if (!Number.isSafeInteger(messageOrdinal) || messageOrdinal < 0) return undefined;
+		let current = 0;
+		for (const entry of this.fileEntries) {
+			if (entry.type !== "message") continue;
+			if (current++ === messageOrdinal) return entry;
+		}
+		return undefined;
 	}
 
 	/**
 	 * Get all direct children of an entry.
 	 */
 	getChildren(parentId: string): SessionEntry[] {
+		if (this.historyStore) return this.historyStore.getChildren(parentId);
 		const children: SessionEntry[] = [];
 		for (const entry of this.byId.values()) {
 			if (entry.parentId === parentId) {
@@ -1235,7 +1984,11 @@ export class SessionManager {
 	 * Get the label for an entry, if any.
 	 */
 	getLabel(id: string): string | undefined {
-		return this.labelsById.get(id);
+		return this.historyStore?.getLabel(id) ?? this.labelsById.get(id);
+	}
+
+	private _getLabelTimestamp(id: string): string | undefined {
+		return this.historyStore?.getLabelTimestamp(id) ?? this.labelTimestampsById.get(id);
 	}
 
 	/**
@@ -1244,12 +1997,12 @@ export class SessionManager {
 	 * Pass undefined or empty string to clear the label.
 	 */
 	appendLabelChange(targetId: string, label: string | undefined): string {
-		if (!this.byId.has(targetId)) {
+		if (!this._hasEntry(targetId)) {
 			throw new Error(`Entry ${targetId} not found`);
 		}
 		const entry: LabelEntry = {
 			type: "label",
-			id: generateId(this.byId),
+			id: generateId(this._entryIds()),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			targetId,
@@ -1272,6 +2025,7 @@ export class SessionManager {
 	 * Use buildSessionContext() to get the resolved messages for the LLM.
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
+		if (this.historyStore) return this.historyStore.getBranch(fromId);
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
 		let current = startId ? this.byId.get(startId) : undefined;
@@ -1283,12 +2037,280 @@ export class SessionManager {
 		return path;
 	}
 
+	iterateBranchEntries(visitor: (entry: SessionEntry) => void, fromId?: string): void {
+		const leafId = fromId ?? this.leafId;
+		if (!leafId) return;
+		if (this.historyStore) {
+			this.historyStore.iterateBranchEntries(leafId, visitor);
+			return;
+		}
+		for (const entry of this.getBranch(leafId)) visitor(entry);
+	}
+
 	/**
 	 * Build the active, compaction-aware entry list for context/rendering.
 	 * Uses tree traversal from current leaf.
 	 */
 	buildContextEntries(): SessionEntry[] {
-		return buildContextEntries(this.getEntries(), this.leafId, this.byId);
+		return (
+			this.historyStore?.getActiveContextEntries() ?? buildContextEntries(this.getEntries(), this.leafId, this.byId)
+		);
+	}
+
+	/** Bounded active, compaction-aware entry projection. */
+	getActiveContextEntries(): SessionEntry[] {
+		return this.buildContextEntries();
+	}
+
+	/** Metadata-only active ancestry, ordered from root to current leaf. */
+	getActiveBranchMetadata(): EntryMetadata[] {
+		if (this.historyStore) return this.historyStore.getActiveBranchMetadata();
+		const locations = new Map<string, { ordinal: number; messageOrdinal?: number }>();
+		let messageOrdinal = 0;
+		for (const [ordinal, entry] of this.getEntries().entries()) {
+			locations.set(entry.id, {
+				ordinal,
+				...(entry.type === "message" ? { messageOrdinal: messageOrdinal++ } : {}),
+			});
+		}
+		return this.getBranch().map((entry) => ({
+			...locations.get(entry.id)!,
+			id: entry.id,
+			parentId: entry.parentId,
+			type: entry.type,
+			customType: entry.type === "custom" || entry.type === "custom_message" ? entry.customType : undefined,
+			timestamp: entry.timestamp,
+			timestampMs: new Date(entry.timestamp).getTime(),
+			offset: 0,
+			length: Buffer.byteLength(JSON.stringify(entry)),
+			firstKeptEntryId: entry.type === "compaction" ? entry.firstKeptEntryId : undefined,
+			effectiveThinkingLevel: "off",
+			hasThinkingLevelChange: false,
+		}));
+	}
+
+	/** Latest custom/custom-message entry without hydrating unrelated history. */
+	getLatestCustomEntry(customType: string, options?: { scope?: "all" | "active" }): SessionEntry | undefined {
+		if (this.historyStore) return this.historyStore.getLatestCustomEntry(customType, options?.scope);
+		const entries = options?.scope === "active" ? this.getBranch() : this.getEntries();
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const entry = entries[index];
+			if ((entry.type === "custom" || entry.type === "custom_message") && entry.customType === customType)
+				return entry;
+		}
+		return undefined;
+	}
+
+	/** Latest message, optionally filtered by role. */
+	getLatestMessage(role?: string, options?: { scope?: "all" | "active" }): SessionEntry | undefined {
+		if (this.historyStore) return this.historyStore.getLatestMessage(role, options?.scope);
+		const entries = options?.scope === "active" ? this.getBranch() : this.getEntries();
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const entry = entries[index];
+			if (entry.type === "message" && (!role || entry.message.role === role)) return entry;
+		}
+		return undefined;
+	}
+
+	/** Latest compaction on the selected branch without hydrating its ancestry. */
+	getLatestActiveCompaction(): CompactionEntry | undefined {
+		if (this.historyStore) return this.historyStore.getActiveCompaction() as CompactionEntry | undefined;
+		const branch = this.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			if (branch[index].type === "compaction") return branch[index] as CompactionEntry;
+		}
+		return undefined;
+	}
+
+	/** Recent active-branch entries, bounded and ordered from oldest to newest. */
+	getRecentActiveEntries(options: RecentActiveEntriesOptions = {}): SessionEntry[] {
+		if (this.historyStore) return this.historyStore.getRecentActiveEntries(options);
+		const branch = this.getBranch();
+		const stopIndex = options.stopBeforeId ? branch.findIndex((entry) => entry.id === options.stopBeforeId) : -1;
+		return branch
+			.slice(stopIndex >= 0 ? stopIndex + 1 : 0)
+			.filter((entry) => {
+				if (options.type && entry.type !== options.type) return false;
+				const customType =
+					entry.type === "custom" || entry.type === "custom_message" ? entry.customType : undefined;
+				if (options.customType && customType !== options.customType) return false;
+				if (options.messageRole && (entry.type !== "message" || entry.message.role !== options.messageRole))
+					return false;
+				return true;
+			})
+			.slice(-Math.max(1, Math.min(options.limit ?? 256, 4096)));
+	}
+
+	findRecentActiveEntry(
+		options: Omit<RecentActiveEntriesOptions, "limit">,
+		predicate: (entry: SessionEntry) => boolean,
+	): SessionEntry | undefined {
+		if (this.historyStore) return this.historyStore.findRecentActiveEntry(options, predicate);
+		const branch = this.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.id === options.stopBeforeId) break;
+			if (options.type && entry.type !== options.type) continue;
+			const customType = entry.type === "custom" || entry.type === "custom_message" ? entry.customType : undefined;
+			if (options.customType && customType !== options.customType) continue;
+			if (options.messageRole && (entry.type !== "message" || entry.message.role !== options.messageRole)) continue;
+			if (predicate(entry)) return entry;
+		}
+		return undefined;
+	}
+
+	async iterateEntries(
+		options: IterateEntriesOptions,
+		visitor: (entry: SessionEntry, metadata: EntryMetadata) => void | Promise<void>,
+	): Promise<void> {
+		if (this.historyStore) return this.historyStore.iterateEntries(options, visitor);
+		const indexed = this.getEntries().map((entry, ordinal) => ({ entry, ordinal }));
+		const messageOrdinals = new Map<SessionEntry, number>();
+		let nextMessageOrdinal = 0;
+		for (const { entry } of indexed) {
+			if (entry.type === "message") messageOrdinals.set(entry, nextMessageOrdinal++);
+		}
+		const ordered = options.direction === "reverse" ? indexed.reverse() : indexed;
+		let visited = 0;
+		for (const { entry, ordinal } of ordered) {
+			if (options.fromOrdinal !== undefined && ordinal < options.fromOrdinal) continue;
+			if (options.toOrdinal !== undefined && ordinal > options.toOrdinal) continue;
+			if (options.type && entry.type !== options.type) continue;
+			const customType = entry.type === "custom" || entry.type === "custom_message" ? entry.customType : undefined;
+			if (options.customType && customType !== options.customType) continue;
+			if (options.messageRole && (entry.type !== "message" || entry.message.role !== options.messageRole)) continue;
+			if (visited >= (options.limit ?? Number.MAX_SAFE_INTEGER)) break;
+			await visitor(entry, {
+				ordinal,
+				messageOrdinal: messageOrdinals.get(entry),
+				id: entry.id,
+				parentId: entry.parentId,
+				type: entry.type,
+				customType,
+				messageRole: entry.type === "message" ? entry.message.role : undefined,
+				timestamp: entry.timestamp,
+				offset: 0,
+				length: Buffer.byteLength(JSON.stringify(entry)),
+				effectiveThinkingLevel: "off",
+				hasThinkingLevelChange: false,
+			});
+			visited++;
+		}
+	}
+
+	async iterateActiveAncestry(visitor: (metadata: EntryMetadata) => void | Promise<void>): Promise<void> {
+		if (this.historyStore) return this.historyStore.iterateActiveAncestry(visitor);
+		// Newest-first lets callers stop after a bounded recent prefix or the latest compaction.
+		for (const metadata of [...this.getActiveBranchMetadata()].reverse()) await visitor(metadata);
+	}
+
+	getHistoryMetrics(): SessionHistoryMetrics | undefined {
+		return this.historyStore?.getMetrics();
+	}
+
+	/** Identity of the persisted source this manager actually has open. */
+	getSessionSourceIdentity(): SessionSourceIdentity | undefined {
+		if (this.historyStore) return this.historyStore.getSourceIdentity();
+		if (!this.sessionFile || !existsSync(this.sessionFile)) return undefined;
+		const stats = statSync(this.sessionFile);
+		return { dev: stats.dev, ino: stats.ino };
+	}
+
+	/** Capture the exact persisted prefix represented by the current history boundary. */
+	captureSessionSourceSnapshot(toOrdinal: number): SessionSourceSnapshot {
+		if (!this.historyStore) throw new Error("Cannot capture a source snapshot for an in-memory session");
+		return this.historyStore.captureSourceSnapshot(toOrdinal);
+	}
+
+	/** Verify that a captured prefix is unchanged; entries appended after it are allowed. */
+	assertSessionSourceSnapshot(snapshot: SessionSourceSnapshot): void {
+		if (!this.historyStore) throw new Error("Cannot verify a source snapshot for an in-memory session");
+		this.historyStore.assertSourceSnapshot(snapshot);
+	}
+
+	/** Durably publish pending JSONL state without rewriting persisted history. */
+	flush(): void {
+		if (this.historyStore) {
+			this.historyStore.flush();
+			return;
+		}
+		if (!this.persist || !this.sessionFile) return;
+		this._rewriteFile();
+		this.flushed = true;
+		this.historyStore = IndexedJsonlSessionHistoryStore.open(this.sessionFile);
+		this.fileEntries = [];
+		this.byId.clear();
+		this.labelsById.clear();
+		this.labelTimestampsById.clear();
+		this.leafId = this.historyStore.leafId;
+	}
+
+	/** Release the disposable sidecar index and its bounded hydration cache. */
+	close(): void {
+		this.historyStore?.close();
+	}
+
+	hasThinkingLevelChange(): boolean {
+		if (this.historyStore) return this.historyStore.hasThinkingLevelChange();
+		return this.getBranch().some((entry) => entry.type === "thinking_level_change");
+	}
+
+	/** Constant-space cumulative counts and usage for persisted v3 sessions. */
+	getHistorySummary(): SessionHistorySummary {
+		if (this.historyStore) return this.historyStore.getHistorySummary();
+		let compactionCount = 0;
+		let totalMessages = 0;
+		let userMessages = 0;
+		let assistantMessages = 0;
+		let toolResults = 0;
+		let toolCalls = 0;
+		let input = 0;
+		let output = 0;
+		let cacheRead = 0;
+		let cacheWrite = 0;
+		let cost = 0;
+		let latestCacheHitRate: number | undefined;
+		const entries = this.getEntries();
+		for (const entry of entries) {
+			let usage: Usage | undefined;
+			if (entry.type === "compaction") compactionCount++;
+			if (entry.type === "message") {
+				totalMessages++;
+				if (entry.message.role === "user") userMessages++;
+				else if (entry.message.role === "assistant") {
+					assistantMessages++;
+					toolCalls += Array.isArray(entry.message.content)
+						? entry.message.content.filter((content) => content.type === "toolCall").length
+						: 0;
+					usage = entry.message.usage;
+					const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+					latestCacheHitRate = promptTokens > 0 ? (usage.cacheRead / promptTokens) * 100 : undefined;
+				} else if (entry.message.role === "toolResult") {
+					toolResults++;
+					usage = entry.message.usage;
+				}
+			} else if (entry.type === "compaction" || entry.type === "branch_summary") {
+				usage = entry.usage;
+			}
+			if (usage) {
+				input += usage.input;
+				output += usage.output;
+				cacheRead += usage.cacheRead;
+				cacheWrite += usage.cacheWrite;
+				cost += usage.cost.total;
+			}
+		}
+		return {
+			entryCount: entries.length,
+			compactionCount,
+			userMessages,
+			assistantMessages,
+			toolResults,
+			totalMessages,
+			toolCalls,
+			usage: { input, output, cacheRead, cacheWrite, cost },
+			latestCacheHitRate,
+		};
 	}
 
 	/**
@@ -1296,13 +2318,47 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildSessionContext(): SessionContext {
-		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
+		const context = this.buildSessionContextSource();
+		return { messages: context.messages.materialize(), thinkingLevel: context.thinkingLevel, model: context.model };
+	}
+
+	/** Deferred context source for automatic startup and branch navigation paths. */
+	buildSessionContextSource(): SessionContextSource {
+		if (this.historyStore) {
+			const { thinkingLevel, model } = this.historyStore.getEffectiveContextSettings();
+			return {
+				messages: this.historyStore.getActiveContextMessageSource(sessionEntryToContextMessages),
+				thinkingLevel,
+				model,
+			};
+		}
+		const context = buildSessionContext(this.getEntries(), this.leafId, this.byId);
+		const messages = context.messages;
+		return {
+			messages: {
+				length: messages.length,
+				materialize: () => messages.slice(),
+				last: (role) => {
+					if (role === undefined) return messages.at(-1);
+					for (let index = messages.length - 1; index >= 0; index--) {
+						if (messages[index]?.role === role) return messages[index];
+					}
+					return undefined;
+				},
+				iterateReverse: function* () {
+					for (let index = messages.length - 1; index >= 0; index--) yield messages[index]!;
+				},
+			},
+			thinkingLevel: context.thinkingLevel,
+			model: context.model,
+		};
 	}
 
 	/**
 	 * Get session header.
 	 */
 	getHeader(): SessionHeader | null {
+		if (this.historyStore) return this.historyStore.header;
 		const h = this.fileEntries.find((e) => e.type === "session");
 		return h ? (h as SessionHeader) : null;
 	}
@@ -1311,17 +2367,108 @@ export class SessionManager {
 	 * Get all session entries (excludes header). Returns a shallow copy.
 	 * The session is append-only: use appendXXX() to add entries, branch() to
 	 * change the leaf pointer. Entries cannot be modified or deleted.
+	 *
+	 * @deprecated Expensive compatibility API: materializes the complete history.
+	 * Use getEntriesPage(), iterateEntries(), or getTreePage() for bounded reads.
 	 */
 	getEntries(): SessionEntry[] {
-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		return this.historyStore?.getEntries() ?? this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+	}
+
+	/** Read an append-order page without retaining earlier payloads. */
+	getEntriesPage(options: EntryPageOptions = {}): SessionEntryPage {
+		if (this.historyStore) return this.historyStore.getEntriesPage(options);
+		const pageOptions = normalizeCursorPageOptions({
+			afterOrdinal: options.afterOrdinal,
+			direction: "forward",
+			limit: options.limit,
+		});
+		const entries = this.getEntries()
+			.map((entry, ordinal) => ({ entry, ordinal }))
+			.filter(({ entry, ordinal }) => {
+				if (ordinal <= (pageOptions.afterOrdinal ?? -1)) return false;
+				if (options.fromOrdinal !== undefined && ordinal < options.fromOrdinal) return false;
+				if (options.toOrdinal !== undefined && ordinal > options.toOrdinal) return false;
+				if (options.type && entry.type !== options.type) return false;
+				const customType =
+					entry.type === "custom" || entry.type === "custom_message" ? entry.customType : undefined;
+				if (options.customType && customType !== options.customType) return false;
+				if (options.messageRole && (entry.type !== "message" || entry.message.role !== options.messageRole))
+					return false;
+				return true;
+			});
+		const page = entries.slice(0, pageOptions.limit);
+		return {
+			entries: page.map(({ entry }) => entry),
+			nextOrdinal: entries.length > pageOptions.limit ? page[page.length - 1]?.ordinal : undefined,
+		};
+	}
+
+	/**
+	 * Read a bounded flat page of tree records without constructing the complete tree.
+	 * Reverse pages contain the newest matching records but remain chronological within the page.
+	 */
+	async getTreePage(options: SessionTreePageOptions = {}): Promise<SessionTreePage> {
+		if (this.historyStore) return this.historyStore.getTreePage(options);
+		const pageOptions = normalizeCursorPageOptions(options);
+		if (
+			(pageOptions.direction === "forward" && pageOptions.afterOrdinal === Number.MAX_SAFE_INTEGER) ||
+			(pageOptions.direction === "reverse" && pageOptions.beforeOrdinal === 0)
+		) {
+			return { entries: [], nextOrdinal: null };
+		}
+
+		const records: SessionTreePageEntry[] = [];
+		await this.iterateEntries(
+			{
+				type: options.type,
+				customType: options.customType,
+				messageRole: options.messageRole,
+				fromOrdinal:
+					pageOptions.direction === "forward" && pageOptions.afterOrdinal !== undefined
+						? pageOptions.afterOrdinal + 1
+						: undefined,
+				toOrdinal:
+					pageOptions.direction === "reverse" && pageOptions.beforeOrdinal !== undefined
+						? pageOptions.beforeOrdinal - 1
+						: undefined,
+				direction: pageOptions.direction,
+				limit: pageOptions.limit + 1,
+			},
+			(entry, metadata) => {
+				records.push({
+					ordinal: metadata.ordinal,
+					messageOrdinal: metadata.messageOrdinal,
+					id: metadata.id,
+					parentId: metadata.parentId,
+					type: entry.type,
+					customType: metadata.customType,
+					messageRole: metadata.messageRole,
+					timestamp: metadata.timestamp,
+					label: this.getLabel(entry.id),
+					labelTimestamp: this._getLabelTimestamp(entry.id),
+					entryPreview: createTreePreviewEntry(entry),
+				});
+			},
+		);
+
+		const hasMore = records.length > pageOptions.limit;
+		if (hasMore) records.pop();
+		const nextOrdinal = hasMore ? records[records.length - 1]!.ordinal : null;
+		if (pageOptions.direction === "reverse") records.reverse();
+		return { entries: records, nextOrdinal };
 	}
 
 	/**
 	 * Get the session as a tree structure. Returns a shallow defensive copy of all entries.
 	 * A well-formed session has exactly one root (first entry with parentId === null).
 	 * Orphaned entries (broken parent chain) are also returned as roots.
+	 *
+	 * @deprecated Expensive compatibility API: constructs the complete tree.
+	 * Use getTreePage() for bounded metadata reads.
 	 */
 	getTree(): SessionTreeNode[] {
+		if (this.historyStore) return this.historyStore.getTree();
 		const entries = this.getEntries();
 		const nodeMap = new Map<string, SessionTreeNode>();
 		const roots: SessionTreeNode[] = [];
@@ -1372,10 +2519,11 @@ export class SessionManager {
 	 * are not modified or deleted.
 	 */
 	branch(branchFromId: string): void {
-		if (!this.byId.has(branchFromId)) {
+		if (!this._hasEntry(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
 		this.leafId = branchFromId;
+		this.historyStore?.setVolatileLeaf(branchFromId);
 	}
 
 	/**
@@ -1385,6 +2533,7 @@ export class SessionManager {
 	 */
 	resetLeaf(): void {
 		this.leafId = null;
+		this.historyStore?.setVolatileLeaf(null);
 	}
 
 	/**
@@ -1399,14 +2548,15 @@ export class SessionManager {
 		fromHook?: boolean,
 		usage?: Usage,
 	): string {
-		if (branchFromId !== null && !this.byId.has(branchFromId)) {
+		if (branchFromId !== null && !this._hasEntry(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
 		const fromId = this.leafId ?? "root";
 		this.leafId = branchFromId;
+		this.historyStore?.setVolatileLeaf(branchFromId);
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
-			id: generateId(this.byId),
+			id: generateId(this._entryIds()),
 			parentId: branchFromId,
 			timestamp: new Date().toISOString(),
 			fromId,
@@ -1426,6 +2576,122 @@ export class SessionManager {
 	 */
 	createBranchedSession(leafId: string): string | undefined {
 		const previousSessionFile = this.sessionFile;
+		if (this.historyStore && this.persist) {
+			if (!this.historyStore.has(leafId)) throw new Error(`Entry ${leafId} not found`);
+			const sourceStore = this.historyStore;
+			const newSessionId = createSessionId();
+			const timestamp = new Date().toISOString();
+			const newSessionFile = join(this.getSessionDir(), `${timestamp.replace(/[:.]/g, "-")}_${newSessionId}.jsonl`);
+			const header: SessionHeader = {
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id: newSessionId,
+				timestamp,
+				cwd: this.cwd,
+				parentSession: previousSessionFile,
+			};
+			sourceStore.flush();
+			const release = acquireSourceLock(sourceStore.filePath);
+			let candidatePath: string | undefined;
+			let candidateFd: number | undefined;
+			try {
+				candidatePath = createSiblingTempPath(newSessionFile, "branch");
+				candidateFd = openSync(candidatePath, "wx", 0o600);
+				writeJsonLineSync(candidateFd, header);
+				let parentId: string | null = null;
+				let hasAssistant = false;
+				let retainedEntryCount = 0;
+				let retainedBytes = 0;
+				sourceStore.iterateBranchEntries(leafId, (entry) => {
+					if (entry.type === "label") return;
+					const next = { ...entry, parentId } as SessionEntry;
+					const line = sessionJsonLine(next);
+					writeAllSync(candidateFd!, line);
+					retainedEntryCount++;
+					retainedBytes += line.length;
+					parentId = next.id;
+					if (next.type === "message" && next.message.role === "assistant") {
+						hasAssistant = true;
+					}
+				});
+
+				let labelOrdinal = 0;
+				sourceStore.iterateBranchEntries(leafId, (entry) => {
+					if (entry.type === "label") return;
+					const label = sourceStore.getLabel(entry.id);
+					const labelTimestamp = sourceStore.getLabelTimestamp(entry.id);
+					if (!label || !labelTimestamp) return;
+					let labelId: string;
+					do {
+						labelId = `branch-label-${newSessionId}-${labelOrdinal.toString(36)}`;
+						labelOrdinal++;
+					} while (sourceStore.has(labelId));
+					const labelEntry: LabelEntry = {
+						type: "label",
+						id: labelId,
+						parentId,
+						timestamp: labelTimestamp,
+						targetId: entry.id,
+						label,
+					};
+					const line = sessionJsonLine(labelEntry);
+					writeAllSync(candidateFd!, line);
+					retainedEntryCount++;
+					retainedBytes += line.length;
+					parentId = labelEntry.id;
+				});
+
+				fchmodSync(candidateFd, 0o600);
+				fdatasyncSync(candidateFd);
+				closeSync(candidateFd);
+				candidateFd = undefined;
+
+				if (!hasAssistant) {
+					if (retainedEntryCount > MAX_DEFERRED_BRANCH_ENTRIES || retainedBytes > MAX_DEFERRED_BRANCH_BYTES) {
+						throw new Error(
+							`Cannot defer branched session with ${retainedEntryCount} entries and ${retainedBytes} bytes; ` +
+								`limit is ${MAX_DEFERRED_BRANCH_ENTRIES} entries and ${MAX_DEFERRED_BRANCH_BYTES} bytes`,
+						);
+					}
+					const deferred = loadEntriesFromFile(candidatePath);
+					removeIfExists(candidatePath);
+					candidatePath = undefined;
+					sourceStore.close();
+					this.historyStore = undefined;
+					this.sessionId = newSessionId;
+					this.sessionFile = newSessionFile;
+					this.fileEntries = deferred;
+					this._buildIndex();
+					this.flushed = false;
+					return newSessionFile;
+				}
+
+				publishNoClobber(candidatePath, newSessionFile);
+				candidatePath = undefined;
+				const replacement = IndexedJsonlSessionHistoryStore.open(newSessionFile);
+				sourceStore.close();
+				this.historyStore = replacement;
+				this.sessionId = newSessionId;
+				this.sessionFile = newSessionFile;
+				this.fileEntries = [];
+				this.byId.clear();
+				this.labelsById.clear();
+				this.labelTimestampsById.clear();
+				this.leafId = replacement.leafId;
+				this.flushed = true;
+				return newSessionFile;
+			} finally {
+				try {
+					if (candidateFd !== undefined) closeSync(candidateFd);
+				} finally {
+					try {
+						if (candidatePath !== undefined) removeIfExists(candidatePath);
+					} finally {
+						release();
+					}
+				}
+			}
+		}
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
 			throw new Error(`Entry ${leafId} not found`);
@@ -1476,10 +2742,10 @@ export class SessionManager {
 		// Collect labels for entries in the path
 		const pathEntryIds = new Set(pathWithoutLabels.map((e) => e.id));
 		const labelsToWrite: Array<{ targetId: string; label: string; timestamp: string }> = [];
-		for (const [targetId, label] of this.labelsById) {
-			if (pathEntryIds.has(targetId)) {
-				labelsToWrite.push({ targetId, label, timestamp: this.labelTimestampsById.get(targetId)! });
-			}
+		for (const targetId of pathEntryIds) {
+			const label = this.getLabel(targetId);
+			const labelTimestamp = this._getLabelTimestamp(targetId);
+			if (label && labelTimestamp) labelsToWrite.push({ targetId, label, timestamp: labelTimestamp });
 		}
 
 		if (this.persist) {
@@ -1501,6 +2767,8 @@ export class SessionManager {
 				parentId = labelEntry.id;
 			}
 
+			this.historyStore?.close();
+			this.historyStore = undefined;
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
@@ -1515,6 +2783,11 @@ export class SessionManager {
 			if (hasAssistant) {
 				this._rewriteFile();
 				this.flushed = true;
+				this.historyStore = IndexedJsonlSessionHistoryStore.open(newSessionFile);
+				this.fileEntries = [];
+				this.byId.clear();
+				this.labelsById.clear();
+				this.labelTimestampsById.clear();
 			} else {
 				this.flushed = false;
 			}
@@ -1562,23 +2835,13 @@ export class SessionManager {
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const resolvedPath = resolvePath(path);
 		let header: SessionHeader | null = null;
-		let preloadedFileEntries: FileEntry[] | undefined;
 		if (cwdOverride === undefined && existsSync(resolvedPath)) {
-			try {
-				header = readSessionHeader(resolvedPath);
-			} catch (error) {
-				if (!(error instanceof SessionHeaderScanLimitError)) throw error;
-				// The bounded scan is only a discovery optimization. A full load remains
-				// authoritative for legacy files with very large headers or prefixes.
-				preloadedFileEntries = loadEntriesFromFile(resolvedPath);
-				const firstEntry = preloadedFileEntries[0];
-				header = firstEntry?.type === "session" ? firstEntry : null;
-			}
+			header = readSessionHeader(resolvedPath);
 		}
 		const cwd = cwdOverride ?? (header ? getSessionHeaderCwd(header) : undefined) ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloadedFileEntries);
+		return new SessionManager(cwd, dir, resolvedPath, true);
 	}
 
 	/**
@@ -1616,12 +2879,7 @@ export class SessionManager {
 	): SessionManager {
 		const resolvedSourcePath = resolvePath(sourcePath);
 		const resolvedTargetCwd = resolvePath(targetCwd);
-		const sourceEntries = loadEntriesFromFile(resolvedSourcePath);
-		if (sourceEntries.length === 0) {
-			throw new Error(`Cannot fork: source session file is empty or invalid: ${resolvedSourcePath}`);
-		}
-
-		const sourceHeader = sourceEntries.find((e) => e.type === "session") as SessionHeader | undefined;
+		const sourceHeader = readSessionHeader(resolvedSourcePath);
 		if (!sourceHeader) {
 			throw new Error(`Cannot fork: source session has no header: ${resolvedSourcePath}`);
 		}
@@ -1640,7 +2898,6 @@ export class SessionManager {
 		const fileTimestamp = timestamp.replace(/[:.]/g, "-");
 		const newSessionFile = join(dir, `${fileTimestamp}_${newSessionId}.jsonl`);
 
-		// Write new header pointing to source as parent, with updated cwd
 		const newHeader: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -1649,14 +2906,7 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
-
-		// Copy all non-header entries from source
-		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
-			}
-		}
+		publishForkedSession(resolvedSourcePath, newSessionFile, newHeader);
 
 		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
 	}

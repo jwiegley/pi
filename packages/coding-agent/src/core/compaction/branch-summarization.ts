@@ -115,18 +115,34 @@ export function collectEntriesForBranchSummary(
 		return { entries: [], commonAncestorId: null };
 	}
 
-	// Find common ancestor (deepest node that's on both paths)
-	const oldPath = new Set(session.getBranch(oldLeafId).map((e) => e.id));
-	const targetPath = session.getBranch(targetId);
-
-	// targetPath is root-first, so iterate backwards to find deepest common ancestor
-	let commonAncestorId: string | null = null;
-	for (let i = targetPath.length - 1; i >= 0; i--) {
-		if (oldPath.has(targetPath[i].id)) {
-			commonAncestorId = targetPath[i].id;
-			break;
+	const maximumSteps = session.getHistorySummary().entryCount + 1;
+	const ancestryLength = (start: string): number => {
+		let length = 0;
+		let cursor: string | null = start;
+		while (cursor && length < maximumSteps) {
+			length++;
+			cursor = session.getEntryMetadata(cursor)?.parentId ?? null;
 		}
+		if (cursor) throw new Error(`Cycle in session ancestry at ${cursor}`);
+		return length;
+	};
+	let oldLength = ancestryLength(oldLeafId);
+	let targetLength = ancestryLength(targetId);
+	let oldCursor: string | null = oldLeafId;
+	let targetCursor: string | null = targetId;
+	while (oldCursor && oldLength > targetLength) {
+		oldCursor = session.getEntryMetadata(oldCursor)?.parentId ?? null;
+		oldLength--;
 	}
+	while (targetCursor && targetLength > oldLength) {
+		targetCursor = session.getEntryMetadata(targetCursor)?.parentId ?? null;
+		targetLength--;
+	}
+	while (oldCursor && targetCursor && oldCursor !== targetCursor) {
+		oldCursor = session.getEntryMetadata(oldCursor)?.parentId ?? null;
+		targetCursor = session.getEntryMetadata(targetCursor)?.parentId ?? null;
+	}
+	const commonAncestorId = oldCursor === targetCursor ? oldCursor : null;
 
 	// Collect entries from old leaf back to common ancestor
 	const entries: SessionEntry[] = [];

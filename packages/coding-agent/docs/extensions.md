@@ -1004,11 +1004,14 @@ Read-only access to session state. See [Session Format](session-format.md) for t
 For `tool_call`, this state is synchronized through the current assistant message before handlers run. In parallel tool execution mode it is still not guaranteed to include sibling tool results from the same assistant message.
 
 ```typescript
-ctx.sessionManager.getEntries()             // All entries
+ctx.sessionManager.getEntriesPage({ limit: 256 }) // Bounded append-order page
 ctx.sessionManager.getBranch()              // Current branch
 ctx.sessionManager.buildContextEntries()    // Active branch entries with compaction applied
 ctx.sessionManager.getLeafId()              // Current leaf entry ID
 ```
+
+`getEntries()` and `getTree()` are deprecated compatibility APIs that materialize complete history.
+Use `getEntriesPage()`, `getTreePage()`, targeted lookups, or iterators in normal extension paths.
 
 ### ctx.modelRegistry / ctx.model / ctx.thinkingLevel / ctx.scopedModels
 

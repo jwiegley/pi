@@ -642,11 +642,14 @@ type SessionsLoader = (onProgress?: SessionListProgress) => Promise<SessionInfo[
 /**
  * Delete a session file, trying the `trash` CLI first, then falling back to unlink
  */
-async function deleteSessionFile(
+export async function deleteSessionFile(
 	sessionPath: string,
 ): Promise<{ ok: boolean; method: "trash" | "unlink"; error?: string }> {
+	const targets = [sessionPath, `${sessionPath}.index.sqlite`].filter((path) => existsSync(path));
+	if (targets.length === 0) return { ok: true, method: "trash" };
+
 	// Try `trash` first (if installed)
-	const trashArgs = sessionPath.startsWith("-") ? ["--", sessionPath] : [sessionPath];
+	const trashArgs = targets.some((path) => path.startsWith("-")) ? ["--", ...targets] : targets;
 	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8" });
 
 	const getTrashErrorHint = (): string | null => {
@@ -662,14 +665,20 @@ async function deleteSessionFile(
 		return `trash: ${parts.join(" · ").slice(0, 200)}`;
 	};
 
-	// If trash reports success, or the file is gone afterwards, treat it as successful
-	if (trashResult.status === 0 || !existsSync(sessionPath)) {
+	// A successful deletion removes both the source of truth and its disposable index.
+	if (targets.every((path) => !existsSync(path))) {
 		return { ok: true, method: "trash" };
 	}
 
 	// Fallback to permanent deletion
 	try {
-		await unlink(sessionPath);
+		for (const path of targets) {
+			try {
+				await unlink(path);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+		}
 		return { ok: true, method: "unlink" };
 	} catch (err) {
 		const unlinkError = err instanceof Error ? err.message : String(err);

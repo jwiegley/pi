@@ -7,11 +7,18 @@
 
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
-import type { SessionStats } from "../../core/agent-session.ts";
+import type { ForkMessageChoice, SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
-import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
+import type { SessionEntry, SessionTreeNode, SessionTreePageEntry } from "../../core/session-manager.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+
+export interface RpcPageOptions {
+	afterOrdinal?: number;
+	beforeOrdinal?: number;
+	direction?: "forward" | "reverse";
+	limit?: number;
+}
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -62,8 +69,10 @@ export type RpcCommand =
 	| { id?: string; type: "fork"; entryId: string }
 	| { id?: string; type: "clone" }
 	| { id?: string; type: "get_fork_messages" }
-	| { id?: string; type: "get_entries"; since?: string }
+	| ({ id?: string; type: "get_fork_messages_page" } & RpcPageOptions)
+	| { id?: string; type: "get_entries"; since?: string; afterOrdinal?: number; limit?: number }
 	| { id?: string; type: "get_tree" }
+	| ({ id?: string; type: "get_tree_page" } & RpcPageOptions)
 	| { id?: string; type: "get_last_assistant_text" }
 	| { id?: string; type: "set_session_name"; name: string }
 
@@ -203,9 +212,16 @@ export type RpcResponse =
 	| {
 			id?: string;
 			type: "response";
+			command: "get_fork_messages_page";
+			success: true;
+			data: { messages: ForkMessageChoice[]; nextOrdinal: number | null };
+	  }
+	| {
+			id?: string;
+			type: "response";
 			command: "get_entries";
 			success: true;
-			data: { entries: SessionEntry[]; leafId: string | null };
+			data: { entries: SessionEntry[]; leafId: string | null; nextOrdinal?: number };
 	  }
 	| {
 			id?: string;
@@ -213,6 +229,13 @@ export type RpcResponse =
 			command: "get_tree";
 			success: true;
 			data: { tree: SessionTreeNode[]; leafId: string | null };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_tree_page";
+			success: true;
+			data: { entries: SessionTreePageEntry[]; leafId: string | null; nextOrdinal: number | null };
 	  }
 	| {
 			id?: string;

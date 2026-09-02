@@ -61,7 +61,7 @@ import {
 	CACHE_TTL_MS,
 	type CacheMiss,
 	collectCacheMisses,
-	computeCacheWaste,
+	createCacheWasteAccumulator,
 	detectCacheMiss,
 } from "../../core/cache-stats.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "../../core/defaults.ts";
@@ -91,7 +91,12 @@ import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { type SessionEntry, SessionManager, sessionEntryToContextMessages } from "../../core/session-manager.ts";
+import {
+	buildSessionTreePage,
+	type SessionEntry,
+	SessionManager,
+	sessionEntryToContextMessages,
+} from "../../core/session-manager.ts";
 import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
@@ -99,7 +104,7 @@ import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
-import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
+import { createUsageCostBreakdownAccumulator } from "../../core/usage-totals.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
@@ -149,7 +154,7 @@ import {
 } from "./components/status-indicator.ts";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
-import { TreeSelectorComponent } from "./components/tree-selector.ts";
+import { getSessionEntryCopyText, TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
@@ -241,6 +246,10 @@ function isCompactionCostNotice(item: RenderSessionItem): item is CompactionCost
 }
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
+const MAX_RENDERED_SESSION_ENTRIES = 128;
+const RENDERED_SESSION_TRUNCATION_NOTICE = `History truncated: showing the most recent ${MAX_RENDERED_SESSION_ENTRIES} session entries; older entries are omitted.`;
+const CACHE_MISS_HISTORY_ENTRIES = 4096;
+const NAVIGATION_SELECTOR_ENTRY_LIMIT = 128;
 
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
@@ -1211,7 +1220,7 @@ export class InteractiveMode {
 	 */
 	private getChangelogForDisplay(): string | undefined {
 		// Skip changelog for resumed/continued sessions (already have messages)
-		if (this.session.state.messages.length > 0) {
+		if (this.session.messageCount > 0) {
 			return undefined;
 		}
 
@@ -2865,9 +2874,9 @@ export class InteractiveMode {
 					const now = Date.now();
 					if (now - this.lastEscapeTime < 500) {
 						if (action === "tree") {
-							this.showTreeSelector();
+							void this.showTreeSelector();
 						} else {
-							this.showUserMessageSelector();
+							void this.showUserMessageSelector();
 						}
 						this.lastEscapeTime = 0;
 					} else {
@@ -2898,8 +2907,8 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
 		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
 		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
-		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
-		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
+		this.defaultEditor.onAction("app.session.tree", () => void this.showTreeSelector());
+		this.defaultEditor.onAction("app.session.fork", () => void this.showUserMessageSelector());
 		this.defaultEditor.onAction("app.session.resume", () => this.showSessionSelector());
 
 		this.defaultEditor.onChange = (text: string) => {
@@ -3015,7 +3024,7 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/session") {
-				this.handleSessionCommand();
+				await this.handleSessionCommand();
 				this.editor.setText("");
 				return;
 			}
@@ -3030,7 +3039,7 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/fork") {
-				this.showUserMessageSelector();
+				await this.showUserMessageSelector();
 				this.editor.setText("");
 				return;
 			}
@@ -3040,7 +3049,7 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/tree") {
-				this.showTreeSelector();
+				await this.showTreeSelector();
 				this.editor.setText("");
 				return;
 			}
@@ -3201,7 +3210,8 @@ export class InteractiveMode {
 
 			case "entry_appended":
 				if (event.entry.type === "custom") {
-					this.addCustomEntryToChat(event.entry);
+					if (this.isRenderedHistoryTruncated()) this.rebuildChatFromMessages();
+					else this.addCustomEntryToChat(event.entry);
 					this.ui.requestRender();
 				}
 				break;
@@ -3375,6 +3385,7 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.pendingTools.clear();
+				if (this.isRenderedHistoryTruncated()) this.rebuildChatFromMessages();
 
 				this.ui.requestRender();
 				break;
@@ -3689,10 +3700,13 @@ export class InteractiveMode {
 	): void {
 		this.pendingTools.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
-		// Cache-miss notices are not persisted; re-derive them from the full entry
-		// list and re-inject them after the assistant messages that paid for them.
+		// Cache-miss notices are not persisted; re-derive them from the active
+		// context and re-inject them after the assistant messages that paid for them.
 		const cacheMisses = this.settingsManager.getShowCacheMissNotices()
-			? collectCacheMisses(this.sessionManager.getEntries(), this.session.modelRuntime)
+			? collectCacheMisses(
+					this.sessionManager.getRecentActiveEntries({ limit: CACHE_MISS_HISTORY_ENTRIES }),
+					this.session.modelRuntime,
+				)
 			: new Map<AssistantMessage, CacheMiss>();
 
 		if (options.updateFooter) {
@@ -3848,7 +3862,11 @@ export class InteractiveMode {
 		if (!this.settingsManager.getShowCacheMissNotices()) return;
 
 		// Entries don't contain `message` yet: message_end fires before persistence.
-		const miss = detectCacheMiss(this.sessionManager.getEntries(), message, this.session.modelRuntime);
+		const miss = detectCacheMiss(
+			this.sessionManager.getRecentActiveEntries({ limit: CACHE_MISS_HISTORY_ENTRIES }),
+			message,
+			this.session.modelRuntime,
+		);
 		if (miss) this.addCacheMissNotice(miss);
 	}
 
@@ -3869,16 +3887,14 @@ export class InteractiveMode {
 	}
 
 	renderInitialMessages(): void {
-		const entries = this.sessionManager.buildContextEntries();
-		this.renderSessionEntries(entries, {
+		this.renderRenderableSessionEntries({
 			updateFooter: true,
 			populateHistory: true,
 		});
 		this.renderProjectTrustWarningIfNeeded();
 
 		// Show compaction info if session was compacted
-		const allEntries = this.sessionManager.getEntries();
-		const compactionCount = allEntries.filter((e) => e.type === "compaction").length;
+		const compactionCount = this.sessionManager.getHistorySummary().compactionCount;
 		if (compactionCount > 0) {
 			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
 			this.showStatus(`Session compacted ${times}`);
@@ -3921,7 +3937,36 @@ export class InteractiveMode {
 
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
-		this.renderSessionEntries(this.sessionManager.buildContextEntries());
+		this.renderRenderableSessionEntries();
+	}
+
+	private isRenderedHistoryTruncated(): boolean {
+		const activeEntries =
+			this.sessionManager.getHistoryMetrics()?.session_active_entries ??
+			this.sessionManager.buildContextEntries().length;
+		return activeEntries > MAX_RENDERED_SESSION_ENTRIES;
+	}
+
+	private getRecentRenderableSessionEntries(): SessionEntry[] {
+		const entries = this.sessionManager.getRecentActiveEntries({ limit: MAX_RENDERED_SESSION_ENTRIES + 1 });
+		// Context order moves the latest compaction before its retained entries. The extra raw-ancestry
+		// record lets us remove that compaction without shortening the requested context tail.
+		for (let index = entries.length - 1; index >= 0; index--) {
+			if (entries[index]?.type !== "compaction") continue;
+			entries.splice(index, 1);
+			break;
+		}
+		return entries.slice(-MAX_RENDERED_SESSION_ENTRIES);
+	}
+
+	private renderRenderableSessionEntries(options: { updateFooter?: boolean; populateHistory?: boolean } = {}): void {
+		const truncated = this.isRenderedHistoryTruncated();
+		if (truncated) {
+			this.chatContainer.addChild(new Text(theme.fg("warning", RENDERED_SESSION_TRUNCATION_NOTICE), 1, 0));
+			this.chatContainer.addChild(new Spacer(1));
+		}
+		const entries = truncated ? this.getRecentRenderableSessionEntries() : this.sessionManager.buildContextEntries();
+		this.renderSessionEntries(entries, options);
 	}
 
 	// =========================================================================
@@ -5145,19 +5190,43 @@ export class InteractiveMode {
 		});
 	}
 
-	private showUserMessageSelector(): void {
-		const userMessages = this.session.getUserMessagesForForking();
+	private async showUserMessageSelector(): Promise<void> {
+		try {
+			await this.openUserMessageSelector();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async openUserMessageSelector(): Promise<void> {
+		const page = await this.session.getUserMessagesForForkingPage({
+			direction: "reverse",
+			limit: NAVIGATION_SELECTOR_ENTRY_LIMIT,
+		});
+		const userMessages = page.messages;
 
 		if (userMessages.length === 0) {
-			this.showStatus("No messages to fork from");
+			this.showStatus(
+				page.nextOrdinal === null
+					? "No messages to fork from"
+					: "No non-empty user messages in the recent fork window; older messages are omitted",
+			);
 			return;
 		}
 
 		const initialSelectedId = userMessages[userMessages.length - 1]?.entryId;
+		const truncationNotice =
+			page.nextOrdinal === null
+				? undefined
+				: `Showing the most recent ${userMessages.length} user messages; older messages are omitted.`;
 
 		this.showSelector((done) => {
 			const selector = new UserMessageSelectorComponent(
-				userMessages.map((m) => ({ id: m.entryId, text: m.text })),
+				userMessages.map((message) => ({
+					id: message.entryId,
+					text: message.text,
+					textTruncated: message.textTruncated,
+				})),
 				async (entryId) => {
 					done();
 					try {
@@ -5178,6 +5247,7 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				initialSelectedId,
+				truncationNotice,
 			);
 			return { component: selector, focus: selector.getMessageList() };
 		});
@@ -5204,10 +5274,30 @@ export class InteractiveMode {
 		}
 	}
 
-	private showTreeSelector(initialSelectedId?: string): void {
-		const tree = this.sessionManager.getTree();
+	private async showTreeSelector(initialSelectedId?: string): Promise<void> {
+		try {
+			await this.openTreeSelector(initialSelectedId);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async openTreeSelector(initialSelectedId?: string): Promise<void> {
 		const realLeafId = this.sessionManager.getLeafId();
 		const initialFilterMode = this.settingsManager.getTreeFilterMode();
+		const historySummary = this.sessionManager.getHistorySummary();
+		const anchorId = initialSelectedId ?? realLeafId;
+		const anchor = anchorId ? this.sessionManager.getEntryMetadata(anchorId) : undefined;
+		let page = await this.sessionManager.getTreePage({
+			...(anchor && anchor.ordinal < Number.MAX_SAFE_INTEGER ? { beforeOrdinal: anchor.ordinal + 1 } : {}),
+			direction: "reverse",
+			limit: NAVIGATION_SELECTOR_ENTRY_LIMIT,
+		});
+		const tree = buildSessionTreePage(page.entries, (id) => this.sessionManager.getEntry(id));
+		const isTruncated = page.nextOrdinal !== null || historySummary.entryCount > page.entries.length;
+		const truncationNotice = isTruncated
+			? `Paged view: up to ${NAVIGATION_SELECTOR_ENTRY_LIMIT} of ${historySummary.entryCount} entries are shown at once. Connecting ancestry outside this page is omitted; search and filters apply only here.`
+			: undefined;
 
 		if (tree.length === 0) {
 			this.showStatus("No entries in session");
@@ -5245,7 +5335,7 @@ export class InteractiveMode {
 
 							if (summaryChoice === undefined) {
 								// User pressed escape - re-show tree selector with same selection
-								this.showTreeSelector(entryId);
+								void this.showTreeSelector(entryId);
 								return;
 							}
 
@@ -5293,7 +5383,7 @@ export class InteractiveMode {
 						if (result.aborted) {
 							// Summarization aborted - re-show tree selector with same selection
 							this.showStatus("Branch summarization cancelled");
-							this.showTreeSelector(entryId);
+							void this.showTreeSelector(entryId);
 							return;
 						}
 						if (result.cancelled) {
@@ -5328,8 +5418,11 @@ export class InteractiveMode {
 				},
 				initialSelectedId,
 				initialFilterMode,
+				truncationNotice,
 			);
-			selector.onCopy = async (text) => {
+			selector.onCopy = async (entryId) => {
+				const entry = entryId ? this.sessionManager.getEntry(entryId) : undefined;
+				const text = entry ? getSessionEntryCopyText(entry) : undefined;
 				if (!text) {
 					this.showError("Selected entry has no text to copy");
 					return;
@@ -5340,6 +5433,39 @@ export class InteractiveMode {
 				} catch (error) {
 					this.showError(error instanceof Error ? error.message : String(error));
 				}
+			};
+			let pageRequestInFlight = false;
+			selector.onPageBoundary = (boundary) => {
+				if (pageRequestInFlight) return true;
+				const first = page.entries[0];
+				const last = page.entries.at(-1);
+				if (!first || !last) return false;
+				const available = boundary === "older" ? first.ordinal > 0 : last.ordinal < historySummary.entryCount - 1;
+				if (!available) return false;
+
+				pageRequestInFlight = true;
+				void (async () => {
+					try {
+						const nextPage = await this.sessionManager.getTreePage({
+							...(boundary === "older"
+								? { beforeOrdinal: first.ordinal, direction: "reverse" as const }
+								: { afterOrdinal: last.ordinal, direction: "forward" as const }),
+							limit: NAVIGATION_SELECTOR_ENTRY_LIMIT,
+						});
+						if (nextPage.entries.length === 0) return;
+						const nextTree = buildSessionTreePage(nextPage.entries, (id) => this.sessionManager.getEntry(id));
+						if (nextTree.length === 0) return;
+						const selectedId = boundary === "older" ? nextPage.entries.at(-1)?.id : nextPage.entries[0]?.id;
+						page = nextPage;
+						selector.replaceTree(nextTree, selectedId, boundary === "older" ? "last" : "first");
+						this.ui.requestRender();
+					} catch (error) {
+						this.showError(error instanceof Error ? error.message : String(error));
+					} finally {
+						pageRequestInFlight = false;
+					}
+				})();
+				return true;
 			};
 			return { component: selector, focus: selector };
 		});
@@ -5371,7 +5497,11 @@ export class InteractiveMode {
 						const next = (nextName ?? "").trim();
 						if (!next) return;
 						const mgr = SessionManager.open(sessionFilePath);
-						mgr.appendSessionInfo(next);
+						try {
+							mgr.appendSessionInfo(next);
+						} finally {
+							mgr.close();
+						}
 					},
 					showRenameHint: true,
 					keybindings: this.keybindings,
@@ -6186,16 +6316,21 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private handleSessionCommand(): void {
+	private async handleSessionCommand(): Promise<void> {
 		const stats = this.session.getSessionStats();
 		const sessionName = this.sessionManager.getSessionName();
-		const entries = this.sessionManager.getEntries();
-		const cacheWaste = computeCacheWaste(entries, this.session.modelRuntime);
+		const cacheWasteAccumulator = createCacheWasteAccumulator(this.session.modelRuntime);
+		const usageBreakdownAccumulator = createUsageCostBreakdownAccumulator();
+		await this.sessionManager.iterateEntries({}, (entry) => {
+			cacheWasteAccumulator.add(entry);
+			usageBreakdownAccumulator.add(entry);
+		});
+		const cacheWaste = cacheWasteAccumulator.getTotals();
 
 		// Cost/token totals per provider/model actually used (e.g. OpenRouter `auto`
 		// resolves to a concrete responseModel). Usage without model attribution is
 		// grouped separately so the breakdown reconciles with the session total.
-		const usageBreakdown = getUsageCostBreakdown(entries);
+		const usageBreakdown = usageBreakdownAccumulator.getEntries();
 
 		let info = `${theme.bold("Session Info")}\n\n`;
 		if (sessionName) {
@@ -6435,7 +6570,7 @@ export class InteractiveMode {
 			}),
 			"",
 			"=== Agent messages (JSONL) ===",
-			...this.session.messages.map((msg) => JSON.stringify(msg)),
+			...this.session.getMessagesSnapshot().map((msg) => JSON.stringify(msg)),
 			"",
 		].join("\n");
 
@@ -6483,6 +6618,7 @@ export class InteractiveMode {
 			excludeFromContext,
 			cwd: this.sessionManager.getCwd(),
 		});
+		const isDeferred = this.session.isStreaming;
 
 		// If extension returned a full result, use it directly
 		if (eventResult?.result) {
@@ -6490,7 +6626,7 @@ export class InteractiveMode {
 
 			// Create UI component for display
 			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
-			if (this.session.isStreaming) {
+			if (isDeferred) {
 				this.pendingMessagesContainer.addChild(this.bashComponent);
 				this.pendingBashComponents.push(this.bashComponent);
 			} else {
@@ -6511,12 +6647,12 @@ export class InteractiveMode {
 			// Record the result in session
 			this.session.recordBashResult(command, result, { excludeFromContext });
 			this.bashComponent = undefined;
+			if (!this.session.isStreaming && this.isRenderedHistoryTruncated()) this.rebuildChatFromMessages();
 			this.ui.requestRender();
 			return;
 		}
 
 		// Normal execution path (possibly with custom operations)
-		const isDeferred = this.session.isStreaming;
 		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
 
 		if (isDeferred) {
@@ -6529,6 +6665,7 @@ export class InteractiveMode {
 		}
 		this.ui.requestRender();
 
+		let shouldRebuild = false;
 		try {
 			const result = await this.session.executeBash(
 				command,
@@ -6549,6 +6686,7 @@ export class InteractiveMode {
 					result.fullOutputPath,
 				);
 			}
+			shouldRebuild = !this.session.isStreaming && this.isRenderedHistoryTruncated();
 		} catch (error) {
 			if (this.bashComponent) {
 				this.bashComponent.setComplete(undefined, false);
@@ -6557,6 +6695,7 @@ export class InteractiveMode {
 		}
 
 		this.bashComponent = undefined;
+		if (shouldRebuild) this.rebuildChatFromMessages();
 		this.ui.requestRender();
 	}
 
