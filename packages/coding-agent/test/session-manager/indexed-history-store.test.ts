@@ -1132,9 +1132,11 @@ store.close();
 		store.close();
 	});
 
-	it("serializes source locks across processes with different TMPDIR values", async () => {
+	it("atomically initializes and serializes source locks across processes with different TMPDIR values", async () => {
 		const root = createRoot();
 		const path = join(root, "session.jsonl");
+		const partialPath = join(root, "partial");
+		const attemptPath = join(root, "attempt");
 		const releasePath = join(root, "release");
 		const holderPath = join(root, "lock-holder.ts");
 		const waiterPath = join(root, "lock-waiter.ts");
@@ -1144,11 +1146,25 @@ store.close();
 		mkdirSync(secondTmp);
 		writeSession(path, [header()]);
 		const storeUrl = JSON.stringify(new URL("../../src/core/session-history-store.ts", import.meta.url).href);
+		const sqliteUrl = JSON.stringify(new URL("../../src/core/sqlite.ts", import.meta.url).href);
 		writeFileSync(
 			holderPath,
-			`import { existsSync } from "node:fs";
-import { acquireSourceLock } from ${storeUrl};
-const [path, releasePath] = process.argv.slice(2);
+			`import { existsSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from ${sqliteUrl};
+const [path, partialPath, attemptPath, releasePath] = process.argv.slice(2);
+const originalExec = DatabaseSync.prototype.exec;
+DatabaseSync.prototype.exec = function(this: InstanceType<typeof DatabaseSync>, sql: string) {
+  if (sql.startsWith("PRAGMA application_id = ")) {
+    originalExec.call(this, "CREATE TABLE IF NOT EXISTS source_lock (singleton INTEGER PRIMARY KEY CHECK (singleton = 1))");
+    writeFileSync(partialPath, "partial");
+    process.stdout.write("partial\\n");
+    const waiter = new Int32Array(new SharedArrayBuffer(4));
+    while (!existsSync(attemptPath)) Atomics.wait(waiter, 0, 0, 5);
+    Atomics.wait(waiter, 0, 0, 100);
+  }
+  originalExec.call(this, sql);
+};
+const { acquireSourceLock } = await import(${storeUrl});
 const release = acquireSourceLock(path);
 process.stdout.write("locked\\n");
 const waiter = new Int32Array(new SharedArrayBuffer(4));
@@ -1159,9 +1175,12 @@ process.stdout.write("released\\n");
 		);
 		writeFileSync(
 			waiterPath,
-			`import { acquireSourceLock } from ${storeUrl};
+			`import { writeFileSync } from "node:fs";
+import { acquireSourceLock } from ${storeUrl};
+const [path, attemptPath] = process.argv.slice(2);
+writeFileSync(attemptPath, "attempt");
 process.stdout.write("attempting\\n");
-const release = acquireSourceLock(process.argv[2]);
+const release = acquireSourceLock(path);
 process.stdout.write("acquired\\n");
 release();
 `,
@@ -1200,14 +1219,19 @@ release();
 			return { waitFor, done, output: () => stdout };
 		};
 
-		const holder = launch(holderPath, [path, releasePath], firstTmp);
-		await holder.waitFor("locked");
-		const waiter = launch(waiterPath, [path], secondTmp);
+		const holder = launch(holderPath, [path, partialPath, attemptPath, releasePath], firstTmp);
+		await holder.waitFor("partial");
+		const waiter = launch(waiterPath, [path, attemptPath], secondTmp);
+		const completed = Promise.allSettled([holder.done, waiter.done]);
 		await waiter.waitFor("attempting");
+		await holder.waitFor("locked");
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		expect(waiter.output()).not.toContain("acquired");
 		writeFileSync(releasePath, "release");
-		await Promise.all([holder.done, waiter.done]);
+		const results = await completed;
+		for (const result of results) {
+			if (result.status === "rejected") throw result.reason;
+		}
 		expect(waiter.output()).toContain("acquired");
 	}, 30_000);
 

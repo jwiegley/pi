@@ -104,9 +104,10 @@ describe("resolveConfigValue", () => {
 
 	test("uses stdin when the configured Windows shell requires it", () => {
 		if (process.platform === "win32") return;
+		const shell = shellModule.getShellConfig().shell;
 		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 		vi.spyOn(shellModule, "getShellConfig").mockReturnValue({
-			shell: "/bin/bash",
+			shell,
 			args: ["-s"],
 			commandTransport: "stdin",
 		});

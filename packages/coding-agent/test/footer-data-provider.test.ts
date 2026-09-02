@@ -87,6 +87,12 @@ async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void
 	}
 }
 
+function emitReftableChange(provider: FooterDataProvider): void {
+	const watcher = (provider as unknown as { reftableTablesListWatcher: FSWatcher | null }).reftableTablesListWatcher;
+	expect(watcher).not.toBeNull();
+	watcher!.emit("change", "change", "tables.list");
+}
+
 describe("FooterDataProvider reftable branch detection", () => {
 	let originalCwd: string;
 	let tempDir: string;
@@ -178,7 +184,8 @@ describe("FooterDataProvider reftable branch detection", () => {
 			const onBranchChange = vi.fn();
 			provider.onBranchChange(onBranchChange);
 
-			writeFileSync(join(reftableDir, "tables.list"), "1\n");
+			writeFileSync(join(reftableDir, "tables.list"), "updated\n");
+			emitReftableChange(provider);
 			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1);
 
 			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
@@ -200,8 +207,11 @@ describe("FooterDataProvider reftable branch detection", () => {
 			vi.mocked(execFile).mockClear();
 
 			writeFileSync(join(reftableDir, "tables.list"), "1\n");
-			writeFileSync(join(reftableDir, "tables.list"), "2\n");
-			writeFileSync(join(reftableDir, "tables.list"), "3\n");
+			emitReftableChange(provider);
+			writeFileSync(join(reftableDir, "tables.list"), "22\n");
+			emitReftableChange(provider);
+			writeFileSync(join(reftableDir, "tables.list"), "333\n");
+			emitReftableChange(provider);
 			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1);
 			await new Promise((resolve) => setTimeout(resolve, 650));
 
@@ -222,7 +232,8 @@ describe("FooterDataProvider reftable branch detection", () => {
 			const onBranchChange = vi.fn();
 			provider.onBranchChange(onBranchChange);
 
-			writeFileSync(join(reftableDir, "tables.list"), "1\n");
+			writeFileSync(join(reftableDir, "tables.list"), "updated\n");
+			emitReftableChange(provider);
 			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1);
 			await waitFor(() => provider.getGitBranch() === "foo");
 
