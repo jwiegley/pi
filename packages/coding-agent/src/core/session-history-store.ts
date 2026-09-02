@@ -457,7 +457,12 @@ function acquireSqliteSourceLock(lockPath: string, allowLegacySchema = false): (
 	let db: DatabaseSync | undefined;
 	try {
 		db = new DatabaseSync(lockPath);
-		db.exec(`PRAGMA busy_timeout = ${SOURCE_LOCK_WAIT_MS}`);
+		// Keep ownership inspection and initialization inside one transaction.
+		db.exec(`
+			PRAGMA busy_timeout = ${SOURCE_LOCK_WAIT_MS};
+			PRAGMA journal_mode = DELETE;
+			BEGIN EXCLUSIVE;
+		`);
 		const application = db.prepare("PRAGMA application_id").get() as { application_id: number };
 		if (application.application_id === 0) {
 			const schema = db
@@ -472,11 +477,7 @@ function acquireSqliteSourceLock(lockPath: string, allowLegacySchema = false): (
 			throw new Error(`Refusing unrecognized session lock database: ${lockPath}`);
 		}
 		chmodSync(lockPath, 0o600);
-		db.exec(`
-			PRAGMA journal_mode = DELETE;
-			CREATE TABLE IF NOT EXISTS source_lock (singleton INTEGER PRIMARY KEY CHECK (singleton = 1));
-			BEGIN EXCLUSIVE;
-		`);
+		db.exec("CREATE TABLE IF NOT EXISTS source_lock (singleton INTEGER PRIMARY KEY CHECK (singleton = 1))");
 	} catch (error) {
 		try {
 			db?.close();

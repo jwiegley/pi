@@ -92,7 +92,6 @@ async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 }
-
 describe("FooterDataProvider reftable branch detection", () => {
 	let originalCwd: string;
 	let tempDir: string;
@@ -235,7 +234,8 @@ describe("FooterDataProvider reftable branch detection", () => {
 			const onBranchChange = vi.fn();
 			provider.onBranchChange(onBranchChange);
 
-			writeFileSync(join(reftableDir, "tables.list"), "1\n");
+			writeFileSync(join(reftableDir, "tables.list"), "updated\n");
+			emitReftableChange(provider);
 			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1);
 			await waitFor(() => provider.getGitBranch() === "foo");
 
