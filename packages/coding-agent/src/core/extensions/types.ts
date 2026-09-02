@@ -499,6 +499,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	) => Component;
 }
 
+export type ToolRendererInfo = Pick<ToolDefinition, "name" | "label">;
+export type StockToolRenderers = Pick<ToolDefinition, "renderShell" | "renderCall" | "renderResult">;
+export type ToolRendererWrapper = (
+	tool: Readonly<ToolRendererInfo>,
+	renderers: Readonly<StockToolRenderers>,
+) => StockToolRenderers;
+
 type AnyToolDefinition = ToolDefinition<any, any, any>;
 
 /**
@@ -1309,6 +1316,9 @@ export interface ExtensionAPI {
 		tool: ToolDefinition<TParams, TDetails, TState>,
 	): void;
 
+	/** Wrap the effective renderers for every tool without changing execution. */
+	registerToolRenderer(wrapper: ToolRendererWrapper): void;
+
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
 	// =========================================================================
@@ -1795,6 +1805,7 @@ export interface Extension {
 	sourceInfo: SourceInfo;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool>;
+	toolRenderers: ToolRendererWrapper[];
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
 	entryRenderers?: Map<string, EntryRenderer>;

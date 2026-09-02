@@ -12,6 +12,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
+import { applyToolRendererWrappers } from "./tool-renderers.ts";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -60,6 +61,7 @@ import type {
 	SessionShutdownEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
+	ToolDefinition,
 	ToolResultEvent,
 	ToolResultEventResult,
 	UIPromptKind,
@@ -520,6 +522,12 @@ export class ExtensionRunner {
 			}
 		}
 		return undefined;
+	}
+
+	applyToolRenderers<T extends ToolDefinition>(definition: T, inheritedDefinition?: ToolDefinition): T {
+		return applyToolRendererWrappers(this.extensions, definition, inheritedDefinition, (error) =>
+			this.emitError(error),
+		);
 	}
 
 	getFlags(): Map<string, ExtensionFlag> {

@@ -1416,6 +1416,26 @@ pi.registerTool({
 });
 ```
 
+### pi.registerToolRenderer(wrapper)
+
+Wrap the effective `renderShell`, `renderCall`, and `renderResult` slots for every tool. Wrappers run in extension load order and receive the output of earlier wrappers. A custom tool that replaces a built-in tool inherits any renderer slots it omits before wrappers run.
+
+The returned object may change renderer slots only. Tool execution, parameters, descriptions, prompt metadata, and active state remain unchanged. A throwing wrapper or invalid return is reported as an extension error; later wrappers still run.
+
+```typescript
+pi.registerToolRenderer((tool, renderers) => {
+  if (tool.name !== "bash" || !renderers.renderResult) return renderers;
+
+  const renderResult = renderers.renderResult;
+  return {
+    ...renderers,
+    renderResult(result, options, theme, context) {
+      return renderResult(result, options, theme, context);
+    },
+  };
+});
+```
+
 ### pi.sendMessage(message, options?)
 
 Inject a custom message into the session. Custom messages participate in LLM context. For durable TUI-only content that should not be sent to the LLM, use [`pi.appendEntry()`](#piappendentrycustomtype-data) with [`pi.registerEntryRenderer()`](#piregisterentryrenderercustomtype-renderer).

@@ -2747,30 +2747,30 @@ export class AgentSession {
 		const isAllowedTool = (name: string): boolean =>
 			(!allowedToolNames || allowedToolNames.has(name)) && !excludedToolNames?.has(name);
 
-		const registeredTools = this._extensionRunner.getAllRegisteredTools();
-		const allCustomTools = [
+		const runner = this._extensionRunner;
+		const registeredTools = runner.getAllRegisteredTools();
+		const customTools = [
 			...registeredTools,
 			...this._customTools.map((definition) => ({
 				definition,
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
 			})),
 		].filter((tool) => isAllowedTool(tool.definition.name));
+		const renderedCustomTools = customTools.map((tool) => ({
+			...tool,
+			definition: runner.applyToolRenderers(tool.definition, this._baseToolDefinitions.get(tool.definition.name)),
+		}));
+		const renderedBuiltInTools = Array.from(this._baseToolDefinitions.entries())
+			.filter(([name]) => isAllowedTool(name))
+			.map(([name, definition]) => ({
+				definition: runner.applyToolRenderers(definition),
+				sourceInfo: createSyntheticSourceInfo(`<builtin:${name}>`, { source: "builtin" }),
+			}));
 		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
-			Array.from(this._baseToolDefinitions.entries())
-				.filter(([name]) => isAllowedTool(name))
-				.map(([name, definition]) => [
-					name,
-					{
-						definition,
-						sourceInfo: createSyntheticSourceInfo(`<builtin:${name}>`, { source: "builtin" }),
-					},
-				]),
+			renderedBuiltInTools.map((tool) => [tool.definition.name, tool]),
 		);
-		for (const tool of allCustomTools) {
-			definitionRegistry.set(tool.definition.name, {
-				definition: tool.definition,
-				sourceInfo: tool.sourceInfo,
-			});
+		for (const tool of renderedCustomTools) {
+			definitionRegistry.set(tool.definition.name, tool);
 		}
 		this._toolDefinitions = definitionRegistry;
 		this._toolPromptSnippets = new Map(
@@ -2789,17 +2789,8 @@ export class AgentSession {
 				})
 				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
 		);
-		const runner = this._extensionRunner;
-		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
-		const wrappedBuiltInTools = wrapRegisteredTools(
-			Array.from(this._baseToolDefinitions.values())
-				.filter((definition) => isAllowedTool(definition.name))
-				.map((definition) => ({
-					definition,
-					sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
-				})),
-			runner,
-		);
+		const wrappedExtensionTools = wrapRegisteredTools(renderedCustomTools, runner);
+		const wrappedBuiltInTools = wrapRegisteredTools(renderedBuiltInTools, runner);
 
 		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
