@@ -255,9 +255,10 @@ describe("dead-op elimination", () => {
 			return performance.now() - started;
 		};
 		wide(200);                                    // warm
-		const small = Math.max(wide(250), 0.1);
-		const large = wide(2500);
-		expect(large / small).toBeLessThan(40);       // linear would be ~10x
+		const median = (n: number) => [wide(n), wide(n), wide(n)].sort((a, b) => a - b)[1]!;
+		const small = median(500);
+		const large = median(5_000);
+		expect(large / small).toBeLessThan(30);       // linear would be ~10x
 	});
 
 	it("collapses a pathological redundant producer", () => {
