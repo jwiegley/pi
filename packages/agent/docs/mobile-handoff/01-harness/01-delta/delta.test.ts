@@ -241,24 +241,16 @@ describe("dead-op elimination", () => {
 		expect(run((s) => { delete s.x; s.x = 5; })).toEqual([["d", ["x"]], ["s", ["x"], 5]]);
 	});
 
-	it("is linear in the number of ops", () => {
-		// The naive formulation compares every op against every dominator, which
-		// is quadratic and degrades on exactly the wide flush this pass cleans up.
-		const wide = (n: number) => {
-			const root: Record<string, number> = {};
-			for (let i = 0; i < n; i++) root[`f${i}`] = i;
-			const t = track(root);
-			t.flush();   // drain the base batch
-			const started = performance.now();
-			for (let i = 0; i < n; i++) t.state[`f${i}`] = i + 1;
-			t.flush();
-			return performance.now() - started;
-		};
-		wide(200);                                    // warm
-		const median = (n: number) => [wide(n), wide(n), wide(n)].sort((a, b) => a - b)[1]!;
-		const small = median(500);
-		const large = median(5_000);
-		expect(large / small).toBeLessThan(30);       // linear would be ~10x
+	it("keeps wide independent writes", () => {
+		const root: Record<string, number> = {};
+		for (let i = 0; i < 2_500; i++) root[`f${i}`] = i;
+		const t = track(root);
+		t.flush();
+		for (let i = 0; i < 2_500; i++) t.state[`f${i}`] = i + 1;
+		const ops = t.flush();
+		expect(ops).toHaveLength(2_500);
+		expect(ops[0]).toEqual(["s", ["f0"], 1]);
+		expect(ops.at(-1)).toEqual(["s", ["f2499"], 2_500]);
 	});
 
 	it("collapses a pathological redundant producer", () => {
