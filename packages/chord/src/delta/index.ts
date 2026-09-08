@@ -327,6 +327,15 @@ export function apply<T>(target: T | undefined, ops: readonly Op[]): T {
 	return applyOps(target, ops);
 }
 
+const spliceItems = (target: JsonValue[], index: number, remove: number, items: readonly JsonValue[]): void => {
+	target.splice(index, remove);
+	index = Math.min(index, target.length);
+	const tailEnd = target.length;
+	target.length += items.length;
+	target.copyWithin(index + items.length, index, tailEnd);
+	for (let offset = 0; offset < items.length; offset++) target[index + offset] = items[offset]!;
+};
+
 function applyOps<T>(target: T | undefined, ops: readonly Op[]): T {
 	let root = target as unknown as JsonValue;
 
@@ -350,11 +359,7 @@ function applyOps<T>(target: T | undefined, ops: readonly Op[]): T {
 		if (op[0] === "p") {
 			const target_ = path.length === 0 ? root : resolve(root, path);
 			if (!Array.isArray(target_)) throw new PathError(path);
-			target_.splice(op[2], op[3]);
-			const chunkSize = 10_000;
-			for (let offset = 0; offset < op[4].length; offset += chunkSize) {
-				target_.splice(op[2] + offset, 0, ...op[4].slice(offset, offset + chunkSize));
-			}
+			spliceItems(target_, op[2], op[3], op[4]);
 			continue;
 		}
 		if (op[0] === "m") {
