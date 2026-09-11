@@ -5,7 +5,7 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import { type Component, Container, type Focusable, type TUI } from "../../tui/src/tui.ts";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
+import type { AutocompleteProviderFactory, ExtensionUIContext } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -232,6 +232,139 @@ describe("InteractiveMode.showExtensionCustom", () => {
 	beforeAll(() => {
 		initTheme("dark");
 	});
+
+	function createCustomUI() {
+		const terminal = new VirtualTerminal(40, 12);
+		const ui = new TuiMainScreen(terminal);
+		const editor = new TestFocusableComponent("EDITOR");
+		const editorContainer = new Container();
+		const fakeThis = { editor, editorContainer, keybindings: {}, ui, disposeActiveSelector: vi.fn() };
+		const showExtensionCustom = (
+			InteractiveMode as unknown as { prototype: { showExtensionCustom: ExtensionUIContext["custom"] } }
+		).prototype.showExtensionCustom.bind(fakeThis);
+		editorContainer.addChild(editor);
+		ui.addChild(editorContainer);
+		ui.setFocus(editor);
+		return { terminal, ui, editor, showExtensionCustom };
+	}
+
+	test.each(["background", "refocused", "hidden", "topmost"])(
+		"closing a %s overlay removes only its own component",
+		async (order) => {
+			const { terminal, ui, editor, showExtensionCustom } = createCustomUI();
+			const dialogs = ["OLDER", "NEWER"].map((label) => {
+				const component = Object.assign(new TestFocusableComponent(label), { dispose: vi.fn() });
+				const onHandle = vi.fn();
+				let close: (value: string) => void = () => {
+					throw new Error("close was not initialized");
+				};
+				const result = showExtensionCustom<string>(
+					(_tui, _theme, _keybindings, done) => {
+						close = done;
+						vi.spyOn(component, "handleInput").mockImplementation((data) => done(data));
+						return component;
+					},
+					{ overlay: true, overlayOptions: { row: label === "OLDER" ? 2 : 4 }, onHandle },
+				);
+				const settled = vi.fn();
+				void result.then(settled);
+				return { component, onHandle, result, settled, close: (value: string) => close(value) };
+			});
+			ui.start();
+			try {
+				await flushTui(ui, terminal);
+				const [older, newer] = dialogs;
+				const olderHandle = older.onHandle.mock.calls[0][0];
+				if (order === "refocused") olderHandle.focus();
+				if (order === "hidden") olderHandle.setHidden(true);
+				const closing = order === "topmost" ? newer : older;
+				const remaining = order === "topmost" ? older : newer;
+
+				await Promise.resolve().then(() => closing.close("cancelled"));
+				await expect(closing.result).resolves.toBe("cancelled");
+				closing.close("duplicate");
+				await flushTui(ui, terminal);
+
+				expect(terminal.getViewport().join("\n")).toContain(remaining.component.render()[0]);
+				expect(terminal.getViewport().join("\n")).not.toContain(closing.component.render()[0]);
+				expect(remaining.component.focused).toBe(true);
+				expect(closing.component.focused).toBe(false);
+				expect(closing.component.dispose).toHaveBeenCalledTimes(1);
+				expect(closing.settled).toHaveBeenCalledExactlyOnceWith("cancelled");
+				expect(remaining.component.dispose).not.toHaveBeenCalled();
+				expect(remaining.settled).not.toHaveBeenCalled();
+
+				terminal.sendInput("x");
+				await expect(remaining.result).resolves.toBe("x");
+				await flushTui(ui, terminal);
+				expect(remaining.component.handleInput).toHaveBeenCalledExactlyOnceWith("x");
+				expect(remaining.component.dispose).toHaveBeenCalledTimes(1);
+				expect(remaining.settled).toHaveBeenCalledExactlyOnceWith("x");
+				expect(ui.hasOverlayEntries).toBe(false);
+				expect(editor.focused).toBe(true);
+				terminal.sendInput("e");
+				expect(editor.inputs).toEqual(["e"]);
+			} finally {
+				ui.stop();
+			}
+		},
+	);
+
+	test.each(["synchronous", "asynchronous"])(
+		"%s completion before mounting preserves other overlays and disposes the late component",
+		async (completion) => {
+			const { terminal, ui, editor, showExtensionCustom } = createCustomUI();
+			const existing = new TestFocusableComponent("EXISTING");
+			const existingHandle = ui.showOverlay(existing);
+			const component = Object.assign(new TestFocusableComponent("LATE"), { dispose: vi.fn() });
+			const render = vi.spyOn(component, "render");
+			const onHandle = vi.fn();
+			let close: (value: string) => void = () => {
+				throw new Error("close was not initialized");
+			};
+			let finishFactory: (value: typeof component) => void = () => {
+				throw new Error("finishFactory was not initialized");
+			};
+			ui.start();
+			try {
+				const result = showExtensionCustom<string>(
+					(_tui, _theme, _keybindings, done) => {
+						close = done;
+						if (completion === "synchronous") {
+							done("cancelled");
+							return component;
+						}
+						return new Promise<typeof component>((resolve) => {
+							finishFactory = resolve;
+						});
+					},
+					{ overlay: true, onHandle },
+				);
+				if (completion === "asynchronous") {
+					await flushTui(ui, terminal);
+					close("cancelled");
+					await expect(result).resolves.toBe("cancelled");
+					expect(component.dispose).not.toHaveBeenCalled();
+					finishFactory(component);
+				}
+				await expect(result).resolves.toBe("cancelled");
+				await flushTui(ui, terminal);
+				close("duplicate");
+				expect(component.dispose).toHaveBeenCalledTimes(1);
+				expect(render).not.toHaveBeenCalled();
+				expect(onHandle).not.toHaveBeenCalled();
+				expect(terminal.getViewport().join("\n")).toContain("EXISTING");
+				expect(existing.focused).toBe(true);
+				terminal.sendInput("x");
+				expect(existing.inputs).toEqual(["x"]);
+				existingHandle.hide();
+				expect(ui.hasOverlayEntries).toBe(false);
+				expect(editor.focused).toBe(true);
+			} finally {
+				ui.stop();
+			}
+		},
+	);
 
 	test("overlay custom UI reclaims input after non-overlay custom UI closes", async () => {
 		const terminal = new VirtualTerminal(80, 24);
