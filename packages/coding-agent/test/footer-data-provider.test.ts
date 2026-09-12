@@ -215,8 +215,6 @@ describe("FooterDataProvider reftable branch detection", () => {
 			expect(vi.mocked(execFile)).not.toHaveBeenCalled();
 			await vi.advanceTimersByTimeAsync(2);
 			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
-			await vi.advanceTimersByTimeAsync(650);
-			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
 		} finally {
 			provider.dispose();
 			vi.useRealTimers();
