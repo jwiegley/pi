@@ -81,10 +81,16 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 
 		const agent = match.agent;
 		const completedText = new Map<string, string>();
+		const stoppedOperations = new Set<string>();
+		const stopWaiters = new Map<string, () => void>();
 		let deliveryTail = Promise.resolve();
 		const unsubscribe = match.transcript.state.subscribe((value, _context, delivery) => {
 			if (delivery.kind !== "update" || value.event === null) return;
 			const event = value.event;
+			if (event.type === "run_end" || event.type === "run_suspend") {
+				stoppedOperations.add(event.runId);
+				stopWaiters.get(event.runId)?.();
+			}
 			deliveryTail = deliveryTail.then(async () => {
 				if (event.type === "message_end" && event.runId !== undefined && event.message.role === "assistant") {
 					completedText.set(event.runId, messageText(event.message));
@@ -99,6 +105,11 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 		let response: AgentOperationResponse;
 		try {
 			response = await agent.prompt({ message: command.prompt, images: null }, BACKGROUND_CONTEXT);
+			// Agent RPC and transcript replication use separate channels.
+			const operationId = response.accepted ? response.operationId : null;
+			if (operationId !== null && !stoppedOperations.has(operationId)) {
+				await new Promise<void>((resolve) => stopWaiters.set(operationId, resolve));
+			}
 		} finally {
 			unsubscribe();
 			await deliveryTail;
