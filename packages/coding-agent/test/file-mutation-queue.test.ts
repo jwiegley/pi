@@ -54,24 +54,23 @@ describe("withFileMutationQueue", () => {
 	});
 
 	it("allows different files to proceed in parallel", async () => {
-		const order: string[] = [];
+		const firstStarted = createDeferred();
+		const finishFirst = createDeferred();
+		const secondStarted = createDeferred();
 
-		await Promise.all([
-			withFileMutationQueue("/tmp/file-mutation-queue-a", async () => {
-				order.push("a:start");
-				await delay(30);
-				order.push("a:end");
-			}),
-			withFileMutationQueue("/tmp/file-mutation-queue-b", async () => {
-				order.push("b:start");
-				await delay(30);
-				order.push("b:end");
-			}),
-		]);
+		const first = withFileMutationQueue("/tmp/file-mutation-queue-a", async () => {
+			firstStarted.resolve();
+			await finishFirst.promise;
+		});
+		await firstStarted.promise;
+		const second = withFileMutationQueue("/tmp/file-mutation-queue-b", async () => {
+			secondStarted.resolve();
+		});
 
-		expect(order.indexOf("a:start")).toBeLessThan(order.indexOf("a:end"));
-		expect(order.indexOf("b:start")).toBeLessThan(order.indexOf("b:end"));
-		expect(order.indexOf("b:start")).toBeLessThan(order.indexOf("a:end"));
+		const startedInParallel = await resolvesWithin(secondStarted.promise, 1_000);
+		finishFirst.resolve();
+		await Promise.all([first, second]);
+		expect(startedInParallel).toBe(true);
 	});
 
 	it("uses the same queue for symlink aliases", async () => {
