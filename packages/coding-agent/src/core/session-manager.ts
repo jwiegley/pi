@@ -26,8 +26,8 @@ import {
 	openSync,
 	readdirSync,
 	readSync,
-	type Stats,
 	renameSync,
+	type Stats,
 	statSync,
 	unlinkSync,
 	writeFileSync,
@@ -1953,7 +1953,7 @@ export class SessionManager {
 	appendUsage(kind: string, provider: string, model: string, usage: Usage, note?: string): UsageEntry {
 		const entry: UsageEntry = {
 			type: "usage",
-			id: generateId(this.byId),
+			id: generateId(this._entryIds()),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			kind,
@@ -1976,7 +1976,7 @@ export class SessionManager {
 		usage?: Usage,
 	): string {
 		const timestamp = new Date().toISOString();
-		const systemMessage = getCurrentSystemMessage(this.buildSessionProjection().messages);
+		const systemMessage = this.getCurrentSystemMessage();
 		const id = generateId(this._entryIds());
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -2485,7 +2485,7 @@ export class SessionManager {
 					toolResults++;
 					usage = entry.message.usage;
 				}
-			} else if (entry.type === "compaction" || entry.type === "branch_summary") {
+			} else if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "usage") {
 				usage = entry.usage;
 			}
 			if (usage) {
@@ -2522,6 +2522,15 @@ export class SessionManager {
 	buildSessionContext(): SessionContext {
 		const context = this.buildSessionContextSource();
 		return { messages: context.messages.materialize(), thinkingLevel: context.thinkingLevel, model: context.model };
+	}
+
+	/** Replay prompt/tool state without retaining the conversation payloads. */
+	getCurrentSystemMessage(): SystemMessage | undefined {
+		const messages: SystemMessage[] = [];
+		for (const message of this.buildSessionContextSource().messages.iterateReverse()) {
+			if (message.role === "system") messages.push(message);
+		}
+		return getCurrentSystemMessage(messages.reverse());
 	}
 
 	/** Deferred context source for automatic startup and branch navigation paths. */
@@ -2812,6 +2821,21 @@ export class SessionManager {
 				sourceStore.iterateBranchEntries(leafId, (entry) => {
 					if (entry.type === "label") return;
 					const next = { ...entry, parentId } as SessionEntry;
+					if (
+						next.type === "compaction" &&
+						sourceStore.getEntryMetadata(next.firstKeptEntryId)?.type === "label"
+					) {
+						let current = entry.parentId ? sourceStore.getEntryMetadata(entry.parentId) : undefined;
+						let firstKeptEntryId: string | undefined;
+						while (current) {
+							if (current.id === next.firstKeptEntryId) {
+								if (firstKeptEntryId) next.firstKeptEntryId = firstKeptEntryId;
+								break;
+							}
+							if (current.type !== "label") firstKeptEntryId = current.id;
+							current = current.parentId ? sourceStore.getEntryMetadata(current.parentId) : undefined;
+						}
+					}
 					const line = sessionJsonLine(next);
 					writeAllSync(candidateFd!, line);
 					retainedEntryCount++;

@@ -3347,7 +3347,8 @@ export class InteractiveMode {
 					else this.addCustomEntryToChat(event.entry);
 					this.ui.requestRender();
 				} else if (event.entry.type === "usage" && event.entry.kind === "cache_warm") {
-					this.addCacheWarmingUsage(event.entry);
+					if (this.isRenderedHistoryTruncated()) this.rebuildChatFromMessages();
+					else this.addCacheWarmingUsage(event.entry);
 					this.ui.requestRender();
 				} else if (event.entry.type === "custom_message" && event.entry.display) {
 					this.addMessageToChat(
@@ -3597,13 +3598,20 @@ export class InteractiveMode {
 						this.showStatus("Auto-compaction cancelled");
 					}
 				} else if (event.result) {
-					const entries = this.sessionManager.buildContextEntries();
-					if (entries[0]?.type !== "compaction") {
+					const truncated = this.isRenderedHistoryTruncated();
+					const entries = truncated
+						? this.getRecentRenderableSessionEntries().slice(-(MAX_RENDERED_SESSION_ENTRIES - 1))
+						: this.sessionManager.buildContextEntries();
+					if (!truncated && entries[0]?.type !== "compaction") {
 						throw new Error("Completed compaction is missing from the session context");
 					}
 					this.chatContainer.clear();
+					if (truncated) {
+						this.chatContainer.addChild(new Text(theme.fg("warning", RENDERED_SESSION_TRUNCATION_NOTICE), 1, 0));
+						this.chatContainer.addChild(new Spacer(1));
+					}
 					// The latest compaction is prepended for model context; append it below at its chronological position.
-					this.renderSessionEntries(entries.slice(1));
+					this.renderSessionEntries(truncated ? entries : entries.slice(1));
 					this.addMessageToChat(
 						createCompactionSummaryMessage(
 							event.result.summary,
@@ -4040,13 +4048,9 @@ export class InteractiveMode {
 		let previousDroppedCount = 0;
 		// message_end reaches the UI before the current message is persisted,
 		// so the branch's last assistant message is the previous response.
-		const branch = this.sessionManager.getBranch();
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i];
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				previousDroppedCount = InteractiveMode.countDroppedThinkingBlocks(entry.message);
-				break;
-			}
+		const entry = this.sessionManager.getLatestMessage("assistant", { scope: "active" });
+		if (entry?.type === "message" && entry.message.role === "assistant") {
+			previousDroppedCount = InteractiveMode.countDroppedThinkingBlocks(entry.message);
 		}
 		if (droppedCount <= previousDroppedCount) return;
 

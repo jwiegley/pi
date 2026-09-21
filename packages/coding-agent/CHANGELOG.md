@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added authenticated remote session discovery, exclusive ownership, correlated current-session task turns, and distinct steer/follow-up controls.
+- Added SQLite-backed bounded session history with paged navigation, streamed export, atomic migration, and lazy active transcripts.
+- Added provider-scoped request/idle timeouts, model-local default thinking levels, and extension-wide tool renderer wrappers.
+
+### Changed
+
+- Removed automatic startup model-catalog refresh and bundled Pi documentation paths from the default system prompt.
+
+### Fixed
+
+- Fixed deferred footer renders retaining a replaced session after its history store closes.
+- Fixed concurrent first opens misclassifying a partially initialized session lock database as foreign.
+- Fixed persisted model scopes expanding provider globs and admitting newly registered models that were never explicitly selected.
+
 ## [0.99.1] - 2026-09-29
 
 ### New Features
@@ -334,22 +352,6 @@
 - Fixed the write tool reporting UTF-16 code-unit counts as byte counts by removing the misleading count ([#8979](https://github.com/earendil-works/pi/issues/8979)).
 - Fixed proxied plain-HTTP provider requests hanging after a tool call by tunneling them with CONNECT ([#8134](https://github.com/earendil-works/pi/issues/8134)).
 - Fixed RPC `abort` reporting success without cancelling an in-progress manual compaction ([#8920](https://github.com/earendil-works/pi/issues/8920)).
-
-### Added
-
-- Added authenticated remote session discovery, exclusive ownership, correlated current-session task turns, and distinct steer/follow-up controls.
-- Added SQLite-backed bounded session history with paged navigation, streamed export, atomic migration, and lazy active transcripts.
-- Added provider-scoped request/idle timeouts, model-local default thinking levels, and extension-wide tool renderer wrappers.
-
-### Changed
-
-- Removed automatic startup model-catalog refresh and bundled Pi documentation paths from the default system prompt.
-
-### Fixed
-
-- Fixed deferred footer renders retaining a replaced session after its history store closes.
-- Fixed concurrent first opens misclassifying a partially initialized session lock database as foreign.
-- Fixed persisted model scopes expanding provider globs and admitting newly registered models that were never explicitly selected.
 
 ## [0.84.4] - 2026-08-28
 

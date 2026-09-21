@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added server-enforced exclusive session leases and boundary-queued `followUp()` controls.
+
 ## [0.99.1] - 2026-09-29
 
 ## [0.99.0] - 2026-09-29
@@ -15,10 +21,6 @@
 ## [0.85.1] - 2026-09-05
 
 ## [0.85.0] - 2026-09-04
-
-### Added
-
-- Added server-enforced exclusive session leases and boundary-queued `followUp()` controls.
 
 ## [0.84.4] - 2026-08-28
 

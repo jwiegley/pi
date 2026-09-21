@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	exportFromFile,
@@ -464,8 +465,16 @@ describe("streaming HTML export", () => {
 
 		const result = spawnSync(
 			process.execPath,
-			["--max-old-space-size=64", "--experimental-strip-types", runnerPath, inputPath, outputPath],
-			{ encoding: "utf8", timeout: 120_000, maxBuffer: 1024 * 1024 },
+			["--max-old-space-size=64", "--import", import.meta.resolve("tsx"), runnerPath, inputPath, outputPath],
+			{
+				encoding: "utf8",
+				timeout: 120_000,
+				maxBuffer: 1024 * 1024,
+				env: {
+					...process.env,
+					TSX_TSCONFIG_PATH: fileURLToPath(new URL("../../../tsconfig.json", import.meta.url)),
+				},
+			},
 		);
 
 		expect(result.error).toBeUndefined();

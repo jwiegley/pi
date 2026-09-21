@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added optional model-local default thinking levels for safe provider-specific defaults.
+
 ## [0.99.1] - 2026-09-29
 
 ### Added
@@ -165,10 +171,6 @@
 - Fixed GitHub Copilot Claude Fable 5 requests to use the Anthropic Messages adapter so selected reasoning levels are sent ([#8961](https://github.com/earendil-works/pi/issues/8961)).
 - Fixed OpenAI Codex SSE parsing to process terminal events that are not followed by a blank line ([#9047](https://github.com/earendil-works/pi/issues/9047)).
 - Fixed `NO_PROXY` matching for both root domains and subdomains ([#8737](https://github.com/earendil-works/pi/pull/8737) by [@MeiSiristhebest](https://github.com/MeiSiristhebest)).
-
-### Added
-
-- Added optional model-local default thinking levels for safe provider-specific defaults.
 
 ## [0.84.4] - 2026-08-28
 

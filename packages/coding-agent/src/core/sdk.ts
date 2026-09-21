@@ -335,7 +335,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			...providerTransportOptions,
 			...options,
 			timeoutMs:
-				options.timeoutMs ?? providerTransportOptions.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs,
+				options.timeoutMs ??
+				providerTransportOptions.timeoutMs ??
+				providerRetrySettings.timeoutMs ??
+				effectiveTimeoutMs,
 			websocketConnectTimeoutMs: options.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
 			maxRetries: options.maxRetries ?? providerRetrySettings.maxRetries,
 			maxRetryDelayMs: options.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
@@ -355,16 +358,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Warm only requests for the selected model. Requests a virtual selection routed, or that an
 	// extension redirected, may not be repeated by the next request, so warming them could be wasted.
 	const cacheContextIsCurrent = (requestModel: Model<any>) => {
-		const messages = agent.state.messages;
+		const hasPrefix = agent.captureMessagePrefix();
 		return () => {
 			const currentModel = agent.state.model;
-			const currentMessages = agent.state.messages;
-			return (
-				currentModel.provider === requestModel.provider &&
-				currentModel.id === requestModel.id &&
-				messages.length <= currentMessages.length &&
-				messages.every((message, index) => currentMessages[index] === message)
-			);
+			return currentModel.provider === requestModel.provider && currentModel.id === requestModel.id && hasPrefix();
 		};
 	};
 	const transformProviderPayload = async (payload: unknown) => {

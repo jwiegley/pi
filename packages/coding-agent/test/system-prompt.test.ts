@@ -119,8 +119,8 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).not.toContain("Pi documentation");
 			expect(prompt).not.toContain("Additional docs");
 			expect(prompt).not.toContain("docs/environment-variables.md");
-			expect(prompt).toContain("Guidelines:");
-			expect(prompt).toContain(`Current working directory: ${cwd.replace(/\\/g, "/")}`);
+			expect(prompt).toContain("<rules>\n");
+			expect(prompt).toContain(`<cwd>\n${cwd.replace(/\\/g, "/")}\n</cwd>`);
 		});
 	});
 

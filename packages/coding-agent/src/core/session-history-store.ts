@@ -34,7 +34,7 @@ import { DatabaseSync, type StatementSync } from "./sqlite.ts";
 
 const INDEX_APPLICATION_ID = 0x50494853; // PIHS
 const SOURCE_LOCK_APPLICATION_ID = 0x50494c4b; // PILK
-const INDEX_SCHEMA_VERSION = 7;
+const INDEX_SCHEMA_VERSION = 8;
 const READ_BUFFER_SIZE = 1024 * 1024;
 const MAX_SESSION_RECORD_BYTES = 64 * 1024 * 1024;
 const DEFAULT_CACHE_BYTES = 1024 * 1024;
@@ -683,6 +683,7 @@ function openVerifiedIndexedDescriptor(
 }
 
 export function normalizeStoredAgentMessage(message: AgentMessage): AgentMessage {
+	if (message.role === "system" && message.content == null) return { ...message, content: "" };
 	if (
 		(message.role === "user" || message.role === "assistant" || message.role === "toolResult") &&
 		message.content == null
@@ -766,6 +767,16 @@ export function createTreePreviewEntry(entry: SessionEntry): SessionEntry {
 				type: "model_change",
 				provider: utf8Preview(entry.provider, 256),
 				modelId: utf8Preview(entry.modelId, 256),
+			};
+		case "usage":
+			return {
+				...base,
+				type: "usage",
+				kind: utf8Preview(entry.kind, 256),
+				provider: utf8Preview(entry.provider, 256),
+				model: utf8Preview(entry.model, 256),
+				usage: entry.usage,
+				...(entry.note ? { note: utf8Preview(entry.note, 512) } : {}),
 			};
 		case "thinking_level_change":
 			return { ...base, type: "thinking_level_change", thinkingLevel: utf8Preview(entry.thinkingLevel, 256) };
@@ -1167,7 +1178,7 @@ function metadataProjectsRole(metadata: EntryMetadata, role?: AgentMessage["role
 	if (metadata.type === "message") return metadata.messageRole === role;
 	if (metadata.type === "custom_message") return role === "custom";
 	if (metadata.type === "branch_summary") return role === "branchSummary";
-	if (metadata.type === "compaction") return role === "compactionSummary";
+	if (metadata.type === "compaction") return role === "compactionSummary" || role === "system";
 	return false;
 }
 
@@ -1721,7 +1732,9 @@ export class IndexedJsonlSessionHistoryStore {
 				usage = indexedUsage(entry.message.usage);
 			}
 		}
-		if (entry.type === "compaction" || entry.type === "branch_summary") usage = indexedUsage(entry.usage);
+		if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "usage") {
+			usage = indexedUsage(entry.usage);
+		}
 		const customType = entry.type === "custom" || entry.type === "custom_message" ? entry.customType : null;
 		const firstKeptId = entry.type === "compaction" ? entry.firstKeptEntryId : null;
 		const nearestCompactionId = entry.type === "compaction" ? entry.id : (parent?.nearest_compaction_id ?? null);
@@ -1737,8 +1750,10 @@ export class IndexedJsonlSessionHistoryStore {
 			let retainedBytes = 0;
 			let steps = 0;
 			while (current && steps++ <= (parent?.ancestry_count ?? 0)) {
-				retainedCount++;
-				retainedBytes += current.length;
+				if (current.message_role !== "system") {
+					retainedCount++;
+					retainedBytes += current.length;
+				}
 				if (current.id === entry.firstKeptEntryId) {
 					contextCount += retainedCount;
 					contextPayloadBytes += retainedBytes;
@@ -2069,9 +2084,9 @@ export class IndexedJsonlSessionHistoryStore {
 
 		let count = 0;
 		this.iterateActiveContextMetadata(leafId, (metadata) => {
-			if (metadata.type === "message" || metadata.type === "custom_message" || metadata.type === "compaction") {
+			if (metadata.type === "message" || metadata.type === "custom_message") {
 				count++;
-			} else if (metadata.type === "branch_summary") {
+			} else if (metadata.type === "branch_summary" || metadata.type === "compaction") {
 				count += project(this.hydrate(metadata)).length;
 			}
 		});
@@ -2132,7 +2147,7 @@ export class IndexedJsonlSessionHistoryStore {
 	}
 
 	private getActiveContextOrdinals(leafId = this.volatileLeafId): number[] {
-		type AncestryRow = Pick<EntryRow, "ordinal" | "id" | "parent_id" | "type" | "first_kept_id"> & {
+		type AncestryRow = Pick<EntryRow, "ordinal" | "id" | "parent_id" | "type" | "first_kept_id" | "message_role"> & {
 			depth: number;
 		};
 		if (!leafId) return [];
@@ -2155,7 +2170,7 @@ export class IndexedJsonlSessionHistoryStore {
 						ON parent.ordinal = (SELECT MAX(ordinal) FROM entries WHERE id = ancestry.parent_id)
 					WHERE ancestry.depth + 1 < ?
 				)
-				SELECT ordinal, id, parent_id, type, first_kept_id, depth FROM ancestry
+				SELECT ancestry.*, entries.message_role FROM ancestry JOIN entries USING (ordinal)
 			`);
 		let count = 0;
 		let tailParentId: string | null = null;
@@ -2172,7 +2187,7 @@ export class IndexedJsonlSessionHistoryStore {
 				else postCompaction.push(row.ordinal);
 				continue;
 			}
-			kept.push(row.ordinal);
+			if (row.message_role !== "system") kept.push(row.ordinal);
 			if (row.id === compaction.first_kept_id) {
 				foundFirstKept = true;
 				break;
@@ -2240,6 +2255,8 @@ export class IndexedJsonlSessionHistoryStore {
 				CASE WHEN selected.ordinal = (SELECT ordinal FROM latest_compaction) THEN 0 ELSE 1 END AS context_group
 			FROM selected
 			JOIN entries USING (ordinal)
+			WHERE NOT (entries.type = 'message' AND entries.message_role = 'system'
+				AND selected.depth > COALESCE((SELECT depth FROM latest_compaction), selected.depth))
 			ORDER BY context_group, selected.depth DESC
 		`);
 		let visited = 0;
@@ -2306,6 +2323,8 @@ export class IndexedJsonlSessionHistoryStore {
 				CASE WHEN selected.ordinal = (SELECT ordinal FROM latest_compaction) THEN 0 ELSE 1 END AS context_group
 			FROM selected
 			JOIN entries USING (ordinal)
+			WHERE NOT (entries.type = 'message' AND entries.message_role = 'system'
+				AND selected.depth > COALESCE((SELECT depth FROM latest_compaction), selected.depth))
 			ORDER BY context_group DESC, selected.depth ASC
 		`);
 		let visited = 0;
@@ -2344,7 +2363,7 @@ export class IndexedJsonlSessionHistoryStore {
 		let retainedLast: AgentMessage | undefined;
 		metadata = compaction.parentId ? this.getEntryMetadata(compaction.parentId) : undefined;
 		while (metadata && steps++ < maximumSteps) {
-			if (!retainedLast && metadataProjectsRole(metadata, role)) {
+			if (!retainedLast && metadata.messageRole !== "system" && metadataProjectsRole(metadata, role)) {
 				const projected = project(this.hydrate(metadata));
 				retainedLast = lastMessageForRole(projected, role);
 			}

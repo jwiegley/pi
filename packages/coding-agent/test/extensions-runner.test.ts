@@ -460,7 +460,7 @@ describe("ExtensionRunner", () => {
 		});
 
 		it("keeps first tool when two extensions register the same name", async () => {
-		const first = `
+			const first = `
 			import { Type } from "typebox";
 			export default function(pi) {
 				pi.registerTool({
@@ -472,7 +472,7 @@ describe("ExtensionRunner", () => {
 				});
 			}
 		`;
-		const second = `
+			const second = `
 			import { Type } from "typebox";
 			export default function(pi) {
 				pi.registerTool({
@@ -484,16 +484,16 @@ describe("ExtensionRunner", () => {
 				});
 			}
 		`;
-		fs.writeFileSync(path.join(extensionsDir, "a-first.ts"), first);
-		fs.writeFileSync(path.join(extensionsDir, "b-second.ts"), second);
+			fs.writeFileSync(path.join(extensionsDir, "a-first.ts"), first);
+			fs.writeFileSync(path.join(extensionsDir, "b-second.ts"), second);
 
-		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-		const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-		const tools = runner.getAllRegisteredTools();
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const tools = runner.getAllRegisteredTools();
 
-		expect(tools).toHaveLength(1);
-		expect(tools[0]?.definition.description).toBe("first");
-	});
+			expect(tools).toHaveLength(1);
+			expect(tools[0]?.definition.description).toBe("first");
+		});
 	});
 
 	describe("command collection", () => {

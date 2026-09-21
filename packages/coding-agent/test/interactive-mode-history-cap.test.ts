@@ -1,5 +1,6 @@
 import { Container, Text } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
+import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -102,6 +103,57 @@ describe("InteractiveMode rendered session history cap", () => {
 
 		InteractiveMode.prototype.renderInitialMessages.call(asInteractiveMode(context));
 		expect(context.renderSessionEntries.mock.calls[0]?.[0]).toEqual(expected);
+	});
+
+	test("completed compaction keeps a bounded view with its summary last", async () => {
+		const manager = SessionManager.inMemory();
+		const ids = Array.from({ length: 130 }, (_, index) => manager.appendCustomEntry("test", index));
+		manager.appendCompaction("summary", ids[0]!, 1000);
+		const context = createContext(131);
+		const runtimeHost = Reflect.get(context, "runtimeHost") as { session: { sessionManager: SessionManager } };
+		runtimeHost.session.sessionManager = manager;
+		const addMessageToChat = vi.fn();
+		Object.assign(context, { addMessageToChat, flushCompactionQueue: vi.fn(), defaultEditor: {} });
+		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
+			this: InteractiveMode,
+			event: AgentSessionEvent,
+		) => Promise<void>;
+
+		await handleEvent.call(asInteractiveMode(context), {
+			type: "compaction_end",
+			reason: "manual",
+			aborted: false,
+			willRetry: false,
+			result: { summary: "summary", firstKeptEntryId: ids[0]!, tokensBefore: 1000 },
+		});
+		expect(context.renderSessionEntries.mock.calls[0]?.[0]).toEqual(manager.buildContextEntries().slice(-127));
+		expect(addMessageToChat).toHaveBeenCalledWith(
+			expect.objectContaining({ role: "compactionSummary", summary: "summary" }),
+		);
+		expect(renderChat(context.chatContainer)).toContain(TRUNCATION_NOTICE);
+	});
+
+	test("cache-warming entries cannot grow an already full live chat", async () => {
+		const context = createContext(129);
+		const addCacheWarmingUsage = vi.fn();
+		Object.assign(context, { addCacheWarmingUsage });
+		const manager = SessionManager.inMemory();
+		const entry = manager.appendUsage("cache_warm", "test", "model", {
+			input: 0,
+			output: 0,
+			cacheRead: 1,
+			cacheWrite: 0,
+			totalTokens: 1,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		});
+		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
+			this: InteractiveMode,
+			event: AgentSessionEvent,
+		) => Promise<void>;
+		await handleEvent.call(asInteractiveMode(context), { type: "entry_appended", entry });
+		expect(addCacheWarmingUsage).not.toHaveBeenCalled();
+		expect(context.renderSessionEntries).toHaveBeenCalledOnce();
+		expect(renderChat(context.chatContainer)).toContain(TRUNCATION_NOTICE);
 	});
 
 	test("completed live turns are rebuilt into a bounded view and keep the notice", async () => {

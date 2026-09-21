@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -695,6 +697,92 @@ describe("Agent", () => {
 		agent.reset();
 		expect(agent.messageCount).toBe(0);
 		expect(materializations).toBe(0);
+	});
+
+	it("does not retain removed messages or sources through prefix provenance", () => {
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--expose-gc",
+				"--import",
+				import.meta.resolve("tsx"),
+				fileURLToPath(new URL("./fixtures/agent-message-retention.ts", import.meta.url)),
+			],
+			{
+				encoding: "utf8",
+				timeout: 20_000,
+				env: {
+					...process.env,
+					TSX_TSCONFIG_PATH: fileURLToPath(new URL("../../../tsconfig.json", import.meta.url)),
+				},
+			},
+		);
+		expect(result.error).toBeUndefined();
+		expect(result.status, result.stderr).toBe(0);
+	}, 25_000);
+
+	it("captures a deferred prefix across append, explicit materialization, and shallow copies", () => {
+		const prefix = [
+			{ role: "user" as const, content: "one", timestamp: 1 },
+			{ role: "user" as const, content: "two", timestamp: 2 },
+		];
+		let materializations = 0;
+		const source: AgentMessageSource = {
+			length: prefix.length,
+			materialize: () => {
+				materializations++;
+				return prefix.map((message) => ({ ...message }));
+			},
+			last: () => prefix.at(-1),
+			iterateReverse: () => [...prefix].reverse(),
+		};
+		const agent = new Agent({ streamFn: unusedStreamFunction });
+		agent.setMessageSource(source);
+		agent.appendMessage({ role: "user", content: "tail", timestamp: 3 });
+		const hasPrefix = agent.captureMessagePrefix();
+		agent.appendMessage({ role: "user", content: "appended", timestamp: 4 });
+		expect(hasPrefix()).toBe(true);
+		expect(materializations).toBe(0);
+		agent.getMessagesSnapshot();
+		expect(hasPrefix()).toBe(true);
+		expect(materializations).toBe(1);
+		const live = agent.state.messages;
+		expect(materializations).toBe(2);
+		expect(hasPrefix()).toBe(true);
+		agent.state.messages = [...live];
+		expect(hasPrefix()).toBe(true);
+		const original = agent.state.messages[0];
+		agent.state.messages[0] = { role: "user", content: "replacement", timestamp: 5 };
+		expect(hasPrefix()).toBe(false);
+		agent.state.messages[0] = original;
+		expect(hasPrefix()).toBe(true);
+		agent.state.messages.reverse();
+		expect(hasPrefix()).toBe(false);
+		agent.state.messages = live.slice(0, 2);
+		expect(hasPrefix()).toBe(false);
+		expect(materializations).toBe(2);
+	});
+
+	it("invalidates captured prefixes on deferred source or tail replacement without reading the source", () => {
+		const source: AgentMessageSource = {
+			length: 1,
+			materialize: () => {
+				throw new Error("must remain deferred");
+			},
+			last: () => ({ role: "user", content: "prefix", timestamp: 0 }),
+			iterateReverse: () => [{ role: "user", content: "prefix", timestamp: 0 }],
+		};
+		const agent = new Agent({ streamFn: unusedStreamFunction });
+		agent.setMessageSource(source);
+		agent.appendMessage({ role: "user", content: "tail", timestamp: 1 });
+		const hasPrefix = agent.captureMessagePrefix();
+		agent.popMessage();
+		expect(hasPrefix()).toBe(false);
+		agent.appendMessage({ role: "user", content: "different", timestamp: 2 });
+		expect(hasPrefix()).toBe(false);
+		const hasReplacementPrefix = agent.captureMessagePrefix();
+		agent.setMessageSource({ ...source });
+		expect(hasReplacementPrefix()).toBe(false);
 	});
 
 	it("finds the last message by role across the tail and deferred prefix", () => {

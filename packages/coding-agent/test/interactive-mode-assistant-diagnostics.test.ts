@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -51,7 +52,7 @@ const message: AssistantMessage = {
 type NoticeContext = {
 	chatContainer: Container;
 	settingsManager: { getShowCacheMissNotices(): boolean };
-	sessionManager: { getBranch(): Array<{ type: "message"; message: AssistantMessage }> };
+	sessionManager: SessionManager;
 };
 
 const maybeShowThinkingDropNotice = Reflect.get(InteractiveMode.prototype, "maybeShowThinkingDropNotice") as (
@@ -65,7 +66,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 		const enabled = {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => true },
-			sessionManager: { getBranch: () => [] },
+			sessionManager: SessionManager.inMemory(),
 		};
 		maybeShowThinkingDropNotice.call(enabled, message);
 		const output = stripAnsi(enabled.chatContainer.render(120).join("\n"));
@@ -74,7 +75,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 		const disabled = {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => false },
-			sessionManager: { getBranch: () => [] },
+			sessionManager: SessionManager.inMemory(),
 		};
 		maybeShowThinkingDropNotice.call(disabled, message);
 		expect(disabled.chatContainer.children).toHaveLength(0);
@@ -85,9 +86,10 @@ describe("InteractiveMode assistant diagnostics", () => {
 		const context = {
 			chatContainer: new Container(),
 			settingsManager: { getShowCacheMissNotices: () => true },
-			sessionManager: { getBranch: () => [{ type: "message" as const, message }] },
+			sessionManager: SessionManager.inMemory(),
 		};
 
+		context.sessionManager.appendMessage(message);
 		maybeShowThinkingDropNotice.call(context, { ...message, timestamp: 2 });
 
 		expect(context.chatContainer.children).toHaveLength(0);

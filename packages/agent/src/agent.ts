@@ -1,11 +1,12 @@
 import {
 	createInitialSystemMessage,
 	getCurrentSystemMessage,
-	getCurrentSystemPrompt,
+	getSystemMessageText,
 	type ImageContent,
 	type Message,
 	type Model,
 	type SimpleStreamOptions,
+	type SystemMessage,
 	type TextContent,
 	type ThinkingBudgets,
 	type Transport,
@@ -92,6 +93,9 @@ export interface AgentMessageSource {
 
 class AgentMessageBacking {
 	private source?: AgentMessageSource;
+	// Share the non-owning identity across adoption; the source may die while its messages remain live.
+	private sourceReference?: WeakRef<AgentMessageSource>;
+	private materializedMessages?: WeakRef<AgentMessage>[];
 	private tail: AgentMessage[] = [];
 	private adopted: AgentMessage[];
 
@@ -101,7 +105,9 @@ class AgentMessageBacking {
 
 	get messages(): AgentMessage[] {
 		if (this.source) {
-			this.adopted = [...this.source.materialize(), ...this.tail];
+			const messages = this.source.materialize();
+			this.materializedMessages = messages.map((message) => new WeakRef(message));
+			this.adopted = [...messages, ...this.tail];
 			this.source = undefined;
 			this.tail = [];
 		}
@@ -109,12 +115,22 @@ class AgentMessageBacking {
 	}
 
 	set messages(messages: AgentMessage[]) {
+		if (
+			!this.materializedMessages?.every(
+				(ref, index) => messages[index] !== undefined && messages[index] === ref.deref(),
+			)
+		) {
+			this.sourceReference = undefined;
+			this.materializedMessages = undefined;
+		}
 		this.source = undefined;
 		this.tail = [];
 		this.adopted = messages.slice();
 	}
 
 	setSource(source: AgentMessageSource): void {
+		if (this.sourceReference?.deref() !== source) this.sourceReference = new WeakRef(source);
+		this.materializedMessages = undefined;
 		this.source = source;
 		this.tail = [];
 		this.adopted = [];
@@ -160,6 +176,40 @@ class AgentMessageBacking {
 		return this.messages.pop();
 	}
 
+	captureMessagePrefix(): () => boolean {
+		const source = this.source ? this.sourceReference : undefined;
+		const sourceLength = this.source?.length ?? 0;
+		const tail = (this.source ? this.tail : this.adopted).map((message) => new WeakRef(message));
+		const length = sourceLength + tail.length;
+		return () => {
+			if (length === 0) return true;
+			if (this.length < length) return false;
+			if (this.source && this.source !== source?.deref()) return false;
+			if (
+				!this.source &&
+				source &&
+				(this.sourceReference !== source ||
+					!this.materializedMessages?.every(
+						(ref, index) => this.adopted[index] !== undefined && this.adopted[index] === ref.deref(),
+					))
+			)
+				return false;
+			const messages = this.source ? this.tail : this.adopted;
+			const offset = this.source ? 0 : sourceLength;
+			return tail.every(
+				(ref, index) => messages[offset + index] !== undefined && messages[offset + index] === ref.deref(),
+			);
+		};
+	}
+
+	currentSystemMessage(): SystemMessage | undefined {
+		const messages: SystemMessage[] = [];
+		for (const message of this.iterateReverse()) {
+			if (message.role === "system") messages.push(message);
+		}
+		return getCurrentSystemMessage(messages.reverse());
+	}
+
 	snapshot(): AgentMessage[] {
 		return this.source ? [...this.source.materialize(), ...this.tail] : this.adopted.slice();
 	}
@@ -176,7 +226,8 @@ function createMutableAgentState(
 
 	return {
 		get systemPrompt() {
-			return getCurrentSystemPrompt(messageBacking.messages);
+			const message = messageBacking.currentSystemMessage();
+			return message ? getSystemMessageText(message) : "";
 		},
 		model: initialState?.model ?? DEFAULT_MODEL,
 		thinkingLevel: initialState?.thinkingLevel ?? "off",
@@ -407,6 +458,16 @@ export class Agent {
 		return this.messageBacking.pop();
 	}
 
+	/** Check whether the current transcript still extends this prefix without materializing a deferred source. */
+	captureMessagePrefix(): () => boolean {
+		return this.messageBacking.captureMessagePrefix();
+	}
+
+	/** Replay prompt and tool state without adopting deferred conversation payloads. */
+	getCurrentSystemMessage(): SystemMessage | undefined {
+		return this.messageBacking.currentSystemMessage();
+	}
+
 	/** Return a detached real array without adopting it as the public live transcript. */
 	getMessagesSnapshot(): AgentMessage[] {
 		return this.messageBacking.snapshot();
@@ -492,7 +553,7 @@ export class Agent {
 			throw new Error("Agent is already processing. Wait for completion before resetting.");
 		}
 
-		const baseline = getCurrentSystemMessage(this._state.messages);
+		const baseline = this.messageBacking.currentSystemMessage();
 		this.messageBacking.messages = baseline ? [baseline] : [];
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
@@ -522,7 +583,7 @@ export class Agent {
 		}
 
 		const lastMessage = this.lastMessage;
-		if (!lastMessage || this._state.messages.every((message) => message.role === "system")) {
+		if (!lastMessage || !this.findLastMessage((message) => message.role !== "system")) {
 			throw new Error("No messages to continue from");
 		}
 

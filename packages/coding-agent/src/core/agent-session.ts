@@ -1736,13 +1736,11 @@ export class AgentSession {
 	 */
 	private _preparePromptAndToolLoadout(
 		options: NormalizedBuildSystemPromptOptions,
-		messages: AgentMessage[] = this.agent.state.messages,
+		messages?: AgentMessage[],
 	): SystemMessage | undefined {
 		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
-		const sections = diffSystemPromptSections(
-			getCurrentSystemMessage(messages)?.sections ?? {},
-			buildSystemPromptSections(options),
-		);
+		const current = messages ? getCurrentSystemMessage(messages) : this.agent.getCurrentSystemMessage();
+		const sections = diffSystemPromptSections(current?.sections ?? {}, buildSystemPromptSections(options));
 		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
 	}
 
@@ -1804,7 +1802,7 @@ export class AgentSession {
 	 * set, so the transcript's declarations are the whole loadout.
 	 */
 	private _restoreToolsFromTranscript(): void {
-		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
+		const current = this.sessionManager.getCurrentSystemMessage();
 		if (!current) return;
 		this.setActiveToolsByName((current.toolsAdded ?? []).map((tool) => tool.name));
 	}

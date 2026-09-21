@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { SessionEntry } from "./session-manager.ts";
+import type { SessionEntry, UsageEntry } from "./session-manager.ts";
 
 /**
  * Prompt-cache TTL: idle gaps longer than this are worth mentioning as the
@@ -94,14 +94,17 @@ function detectMiss(
 	};
 }
 
-function asPreviousRequest(message: AssistantMessage, reportedCache: boolean): PreviousRequest | undefined {
+function asPreviousRequest(
+	message: AssistantMessage | UsageEntry,
+	reportedCache: boolean,
+): PreviousRequest | undefined {
 	const usage = message.usage;
 	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 	if (promptTokens <= 0) return undefined;
 	return {
 		promptTokens,
 		modelKey: `${message.provider}/${message.model}`,
-		timestamp: message.timestamp,
+		timestamp: typeof message.timestamp === "string" ? Date.parse(message.timestamp) : message.timestamp,
 		reportedCache: reportedCache || usage.cacheRead + usage.cacheWrite > 0,
 	};
 }
@@ -123,15 +126,7 @@ function scan(
 			continue;
 		}
 		if (entry.type === "usage" && entry.kind === "cache_warm") {
-			const promptTokens = entry.usage.input + entry.usage.cacheRead + entry.usage.cacheWrite;
-			if (promptTokens > 0) {
-				prev = {
-					promptTokens,
-					modelKey: `${entry.provider}/${entry.model}`,
-					timestamp: Date.parse(entry.timestamp),
-					reportedCache: true,
-				};
-			}
+			prev = asPreviousRequest(entry, true) ?? prev;
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			const miss = detectMiss(prev, entry.message, models);
 			if (miss) {
@@ -154,6 +149,10 @@ export function createCacheWasteAccumulator(models: ModelPriceSource): CacheWast
 		add(entry) {
 			if (entry.type === "compaction" || entry.type === "branch_summary") {
 				prev = undefined;
+				return;
+			}
+			if (entry.type === "usage" && entry.kind === "cache_warm") {
+				prev = asPreviousRequest(entry, true) ?? prev;
 				return;
 			}
 			if (entry.type !== "message" || entry.message.role !== "assistant") return;

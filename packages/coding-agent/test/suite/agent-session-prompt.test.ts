@@ -405,8 +405,8 @@ describe("AgentSession prompt characterization", () => {
 		await expect(custom).rejects.toThrow("exclusively assigned");
 		const result = await handle.completed;
 		expect(result.id).toBe(handle.id);
-		expect(result.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
-		expect(getMessageText(result.messages[0]!)).toBe("task prompt");
+		expect(result.messages.map((message) => message.role)).toEqual(["system", "user", "assistant"]);
+		expect(getMessageText(result.messages[1]!)).toBe("task prompt");
 	});
 
 	it("does not report streamingBehavior to input handlers while idle", async () => {
@@ -526,6 +526,64 @@ describe("AgentSession prompt characterization", () => {
 
 		releaseToolExecution?.();
 		await promptPromise;
+	});
+
+	it("uses request snapshots without adopting deferred history after between-turn compaction", async () => {
+		const harness = await createHarness({
+			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
+			tools: [
+				{
+					name: "compact_next",
+					label: "Compact next",
+					description: "Trigger threshold compaction",
+					parameters: Type.Object({}),
+					execute: async () => {
+						harness.session.agent.state.model = { ...harness.session.agent.state.model, contextWindow: 1 };
+						return { content: [{ type: "text", text: "ready" }], details: {} };
+					},
+				},
+			],
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		const agent = harness.session.agent;
+		const setSource = agent.setMessageSource.bind(agent);
+		let materializations = 0;
+		vi.spyOn(agent, "setMessageSource").mockImplementation((source) => {
+			setSource({
+				...source,
+				materialize: () => {
+					materializations++;
+					return source.materialize();
+				},
+			});
+		});
+		const liveRead = vi.spyOn(agent.state, "messages", "get").mockImplementation(() => {
+			throw new Error("compaction must not adopt the live transcript");
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("compact_next", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage("done"),
+			]);
+			await harness.session.prompt("compact between turns");
+			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(harness.eventsOfType("compaction_end").some((event) => event.result !== undefined)).toBe(true);
+			expect(materializations).toBeGreaterThan(0);
+			expect(liveRead).not.toHaveBeenCalled();
+		} finally {
+			liveRead.mockRestore();
+		}
 	});
 
 	it("throws when prompted during manual compaction", async () => {
