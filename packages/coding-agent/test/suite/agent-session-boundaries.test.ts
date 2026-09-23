@@ -2,7 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createHarness as createBaseHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve = () => {};
@@ -12,7 +12,8 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 	return { promise, resolve };
 }
 
-describe("AgentSession actionable boundaries", () => {
+describe.each([false, true])("AgentSession actionable boundaries with persistence=%s", (persistSession) => {
+	const createHarness = (options: HarnessOptions = {}) => createBaseHarness({ ...options, persistSession });
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
@@ -128,7 +129,8 @@ describe("AgentSession actionable boundaries", () => {
 	it("keeps a boundary replacement verbatim through threshold compaction", async () => {
 		let handled = false;
 		const requests: string[] = [];
-		const instruction = "EXACT-REPLACEMENT-INSTRUCTION ".repeat(100);
+		// Exceed the context window without relying on the default system prompt's size.
+		const instruction = "EXACT-REPLACEMENT-INSTRUCTION ".repeat(400);
 		const harness = await createHarness({
 			models: [{ id: "faux-1", contextWindow: 2_000, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
@@ -736,7 +738,8 @@ describe("AgentSession actionable boundaries", () => {
 	});
 });
 
-describe("durable length recovery", () => {
+describe.each([false, true])("durable length recovery with persistence=%s", (persistSession) => {
+	const createHarness = (options: HarnessOptions = {}) => createBaseHarness({ ...options, persistSession });
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {

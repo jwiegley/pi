@@ -21,6 +21,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import type { AgentMessage, AgentMessageSource } from "@earendil-works/pi-agent-core";
 import type {
+	ContextEditEntry,
 	CursorPageOptions,
 	FileEntry,
 	SessionEntry,
@@ -789,6 +790,13 @@ export function createTreePreviewEntry(entry: SessionEntry): SessionEntry {
 				targetId: entry.targetId,
 				label: entry.label === undefined ? undefined : utf8Preview(entry.label, 512),
 			};
+		case "context_edit":
+			return {
+				...base,
+				type: "context_edit",
+				targetId: entry.targetId,
+				replacement: entry.replacement === null ? null : { content: previewContentText(entry.replacement.content) },
+			};
 		case "session_info":
 			return {
 				...base,
@@ -866,6 +874,15 @@ function isSessionEntry(entry: FileEntry): entry is SessionEntry {
 			case "session_info": {
 				const name = (entry as { name?: unknown }).name;
 				return name === undefined || typeof name === "string";
+			}
+			case "context_edit": {
+				const edit = entry as { targetId?: unknown; replacement?: unknown };
+				return (
+					typeof edit.targetId === "string" &&
+					(edit.replacement === null ||
+						(isRecord(edit.replacement) &&
+							(typeof edit.replacement.content === "string" || Array.isArray(edit.replacement.content))))
+				);
 			}
 			default:
 				return true;
@@ -2024,18 +2041,36 @@ export class IndexedJsonlSessionHistoryStore {
 		return entries;
 	}
 
-	getActiveContextMessages(project: (entry: SessionEntry) => AgentMessage[]): AgentMessage[] {
-		const messages: AgentMessage[] = [];
-		this.iterateActiveContextMetadata(this.volatileLeafId, (metadata) => {
-			messages.push(...project(this.hydrate(metadata)));
-		});
-		return messages;
+	getActiveContextMessages(project: (entry: SessionEntry, edit?: ContextEditEntry) => AgentMessage[]): AgentMessage[] {
+		return this.getActiveContextMessageSource(project).materialize();
 	}
 
 	/** Capture the current context as a bounded deferred source for Agent internals. */
-	getActiveContextMessageSource(project: (entry: SessionEntry) => AgentMessage[]): AgentMessageSource {
+	getActiveContextMessageSource(
+		projectEntry: (entry: SessionEntry, edit?: ContextEditEntry) => AgentMessage[],
+	): AgentMessageSource {
 		const leafId = this.volatileLeafId;
-		const length = this.countActiveContextMessages(leafId, project);
+		const leaf = leafId ? this.getEntryMetadata(leafId) : undefined;
+		const edits = new Map<string, EntryMetadata>();
+		const omittedIds = new Set<string>();
+		if (
+			leaf &&
+			this.db.prepare("SELECT 1 FROM entries WHERE type = 'context_edit' AND ordinal <= ? LIMIT 1").get(leaf.ordinal)
+		) {
+			this.iterateActiveContextMetadata(leafId, (metadata) => {
+				if (metadata.type !== "context_edit") return;
+				const edit = this.hydrate(metadata) as ContextEditEntry;
+				edits.set(edit.targetId, metadata);
+				if (edit.replacement === null) omittedIds.add(edit.targetId);
+				else omittedIds.delete(edit.targetId);
+			});
+		}
+		const project = (entry: SessionEntry): AgentMessage[] => {
+			if (entry.type === "compaction" && entry.id !== leaf?.nearestCompactionId) return [];
+			const edit = edits.get(entry.id);
+			return projectEntry(entry, edit ? (this.hydrate(edit) as ContextEditEntry) : undefined);
+		};
+		const length = this.countActiveContextMessages(leafId, project, omittedIds);
 		return {
 			length,
 			materialize: () => {
@@ -2061,7 +2096,11 @@ export class IndexedJsonlSessionHistoryStore {
 		}
 	}
 
-	private countActiveContextMessages(leafId: string | null, project: (entry: SessionEntry) => AgentMessage[]): number {
+	private countActiveContextMessages(
+		leafId: string | null,
+		project: (entry: SessionEntry) => AgentMessage[],
+		omittedIds: ReadonlySet<string>,
+	): number {
 		if (!leafId) return 0;
 		const leaf = this.getRowByOrdinal(this.getEntryMetadata(leafId)?.ordinal ?? -1);
 		if (leaf && leaf.nearest_compaction_id === null && leaf.ancestry_count === leaf.ordinal + 1) {
@@ -2073,6 +2112,15 @@ export class IndexedJsonlSessionHistoryStore {
 				`)
 				.get(leaf.ordinal) as { count: number };
 			let count = base.count;
+			for (const id of omittedIds) {
+				const target = this.getEntryMetadata(id);
+				if (
+					target &&
+					target.ordinal <= leaf.ordinal &&
+					(target.type === "message" || target.type === "custom_message")
+				)
+					count--;
+			}
 			const branchSummaries = this.db.prepare(
 				"SELECT * FROM entries WHERE ordinal <= ? AND type = 'branch_summary' ORDER BY ordinal",
 			);
@@ -2085,7 +2133,7 @@ export class IndexedJsonlSessionHistoryStore {
 		let count = 0;
 		this.iterateActiveContextMetadata(leafId, (metadata) => {
 			if (metadata.type === "message" || metadata.type === "custom_message") {
-				count++;
+				if (!omittedIds.has(metadata.id)) count++;
 			} else if (metadata.type === "branch_summary" || metadata.type === "compaction") {
 				count += project(this.hydrate(metadata)).length;
 			}

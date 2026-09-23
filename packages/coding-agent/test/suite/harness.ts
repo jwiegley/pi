@@ -110,6 +110,7 @@ export function createTestUiContext(overrides: Partial<ExtensionUIContext> = {})
 
 export interface HarnessOptions {
 	models?: FauxModelDefinition[];
+	persistSession?: boolean;
 	settings?: Partial<Settings>;
 	tools?: AgentTool[];
 	initialActiveToolNames?: string[];
@@ -157,7 +158,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = SessionManager.inMemory();
+	const sessionManager = options.persistSession ? SessionManager.create(tempDir, tempDir) : SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();

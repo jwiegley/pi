@@ -70,9 +70,8 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
-	estimateContextTokens,
-	estimateProjectedContextTokens,
 	estimateContextTokensReverse,
+	estimateProjectedContextTokens,
 	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
@@ -128,7 +127,6 @@ import {
 	type CompactionEntry,
 	type ContextEditEntry,
 	type CursorPageOptions,
-	getLatestCompactionEntry,
 	type SessionEntry,
 	SessionManager,
 	type SessionProjection,
@@ -439,6 +437,7 @@ export class AgentSession {
 	private _isEmittingAgentSettled = false;
 	private readonly _deferredSettledActions: Array<() => Promise<void>> = [];
 	private _taskTurnSequence = 0;
+	private _taskTurnAbortRequested = false;
 	private _activeTaskTurnId?: string;
 	private _taskTurnDispatchId?: string;
 	private _resourceLoader: ResourceLoader;
@@ -507,6 +506,7 @@ export class AgentSession {
 		this._installAgentBoundaryHooks();
 		this._installHiddenDeclarationsProjection();
 		this._installAgentForcedPromptProjection();
+		this._refreshFinalizedContext();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -757,7 +757,7 @@ export class AgentSession {
 	private _exceedsCompactionThreshold(model: Model<any>, projection: SessionProjection): boolean {
 		if (model.contextWindow <= 0) return false;
 		return shouldCompact(
-			estimateProjectedContextTokens(projection, this.sessionManager.getBranch()).tokens,
+			estimateProjectedContextTokens(projection, this.sessionManager.getActiveBranchMetadata()).tokens,
 			model.contextWindow,
 			this.settingsManager.getCompactionSettings(this.model),
 		);
@@ -771,7 +771,7 @@ export class AgentSession {
 			return { ...context, messages: projection.messages };
 		}
 		await this._runAutoCompaction("threshold", false);
-		return { ...context, messages: this.sessionManager.buildSessionProjection().messages };
+		return { ...context, messages: this.agent.getMessagesSnapshot() };
 	}
 
 	private _installAgentRequestProjection(): void {
@@ -926,11 +926,11 @@ export class AgentSession {
 	// =========================================================================
 
 	private _refreshFinalizedContext(): void {
-		const projection = this.sessionManager.buildSessionProjection();
-		for (const entry of projection.entries) {
-			for (const message of entry.messages) this._entryIdsByMessage.set(message, entry.sourceEntry.id);
-		}
-		this.agent.state.messages = projection.messages;
+		this.agent.setMessageSource(
+			this.sessionManager.buildSessionContextSource((message, entryId) =>
+				this._entryIdsByMessage.set(message, entryId),
+			).messages,
+		);
 	}
 
 	private _applyBoundaryDrafts(manager: SessionManager, drafts: SessionBoundaryDraft[]): SessionEntry[] {
@@ -955,7 +955,7 @@ export class AgentSession {
 				case "compaction": {
 					const tokensBefore = estimateProjectedContextTokens(
 						manager.buildSessionProjection(),
-						manager.getBranch(),
+						manager.getActiveBranchMetadata(),
 					).tokens;
 					entryId = manager.appendCompaction(
 						draft.summary,
@@ -975,6 +975,7 @@ export class AgentSession {
 	}
 
 	private _createBoundaryPreviewManager(drafts: SessionBoundaryDraft[]): SessionManager {
+		if (drafts.length === 0) return this.sessionManager;
 		const header = this.sessionManager.getHeader();
 		if (!header) throw new Error("Session header is missing");
 		const manager = SessionManager.inMemory(this._cwd, undefined, [header, ...this.sessionManager.getBranch()]);
@@ -1012,6 +1013,7 @@ export class AgentSession {
 	}
 
 	private _commitBoundaryDrafts(drafts: SessionBoundaryDraft[]): void {
+		if (drafts.length === 0) return;
 		const appended = this._applyBoundaryDrafts(this.sessionManager, drafts);
 		this._refreshFinalizedContext();
 		for (const entry of appended) this._emit({ type: "entry_appended", entry });
@@ -1203,11 +1205,11 @@ export class AgentSession {
 	private _findPersistedMessageEntryId(message: AgentMessage): string | undefined {
 		const mapped = this._entryIdsByMessage.get(message);
 		if (mapped) return mapped;
-		for (const entry of [...this.sessionManager.getBranch()].reverse()) {
+		for (const entry of this.sessionManager.getActiveContextEntries().reverse()) {
 			if (entry.type === "message" && entry.message === message) return entry.id;
 		}
 
-		const messageIndex = this.agent.state.messages.indexOf(message);
+		const messageIndex = this.agent.getMessagesSnapshot().indexOf(message);
 		if (messageIndex < 0) return undefined;
 		const projection = this.sessionManager.buildSessionProjection();
 		let projectedIndex = 0;
@@ -1227,7 +1229,7 @@ export class AgentSession {
 		const targets = [message, ...toolResults];
 		const targetIds = targets.map((target) => this._findPersistedMessageEntryId(target));
 		const unresolvedProjectedTarget = targets.some(
-			(target, index) => targetIds[index] === undefined && this.agent.state.messages.includes(target),
+			(target, index) => targetIds[index] === undefined && this.agent.getMessagesSnapshot().includes(target),
 		);
 		if (unresolvedProjectedTarget) {
 			throw new Error("Cannot persist recovery omission because a projected message has no source entry");
@@ -2065,6 +2067,7 @@ export class AgentSession {
 		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
 
 		const normalized = await this._normalizePromptImages(currentImages);
+		if (this._activeTaskTurnId && this._taskTurnAbortRequested) return;
 		const userText = normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
 
 		// Build messages only after hooks and image normalization have completed.
@@ -2393,20 +2396,51 @@ export class AgentSession {
 		content: string | (TextContent | ImageContent)[],
 		options?: { expandPromptTemplates?: boolean },
 	): TaskTurnHandle {
-		if (!this.isIdle || this._activeTaskTurnId) throw new Error("Current session already has an active task turn");
+		if (!this.isIdle || this._activeTaskTurnId || this._deferredSettledActions.length > 0) {
+			throw new Error("Current session already has an active task turn or queued work");
+		}
 		const id = `task-turn-${++this._taskTurnSequence}`;
-		const startIndex = this.messages.length;
+		const messages: AgentMessage[] = [];
+		const unsubscribe = this.subscribe((event) => {
+			if (event.type === "message_end") messages.push(event.message);
+		});
 		this._activeTaskTurnId = id;
-		this._taskTurnDispatchId = id;
+		this._taskTurnAbortRequested = false;
 		const assertActive = () => {
 			if (this._activeTaskTurnId !== id) throw new Error(`Task turn ${id} is no longer active`);
 		};
-		const running = this.sendUserMessage(content, { expandPromptTemplates: options?.expandPromptTemplates ?? false });
-		this._taskTurnDispatchId = undefined;
+		const dispatch = () => {
+			this._taskTurnDispatchId = id;
+			try {
+				return this.sendUserMessage(content, { expandPromptTemplates: options?.expandPromptTemplates ?? false });
+			} finally {
+				this._taskTurnDispatchId = undefined;
+			}
+		};
+		let cancelPending: (() => void) | undefined;
+		const running = this._isEmittingAgentSettled
+			? new Promise<void>((resolve, reject) => {
+					const action = () => {
+						cancelPending = undefined;
+						return dispatch().then(resolve, reject);
+					};
+					cancelPending = () => {
+						const index = this._deferredSettledActions.indexOf(action);
+						if (index >= 0) this._deferredSettledActions.splice(index, 1);
+						cancelPending = undefined;
+						resolve();
+					};
+					this._deferredSettledActions.push(action);
+				})
+			: dispatch();
 		const completed = running
-			.then(() => ({ id, messages: this.messages.slice(startIndex) }))
+			.then(() => ({ id, messages }))
 			.finally(() => {
-				if (this._activeTaskTurnId === id) this._activeTaskTurnId = undefined;
+				unsubscribe();
+				if (this._activeTaskTurnId === id) {
+					this._activeTaskTurnId = undefined;
+					this._taskTurnAbortRequested = false;
+				}
 			});
 		return {
 			id,
@@ -2421,6 +2455,12 @@ export class AgentSession {
 			},
 			abort: async () => {
 				assertActive();
+				this._taskTurnAbortRequested = true;
+				if (cancelPending) {
+					cancelPending();
+					await completed;
+					return;
+				}
 				await this.abort();
 			},
 		};
@@ -2785,10 +2825,10 @@ export class AgentSession {
 			const settings = this.settingsManager.getCompactionSettings(model);
 			const pathEntries = this.sessionManager.getActiveContextEntries();
 
-			const preparation = prepareCompaction(pathEntries, settings);
+			const preparation = prepareCompaction(this.sessionManager, settings);
 			if (!preparation) {
 				// Check why we can't compact
-				const lastEntry = pathEntries[pathEntries.length - 1];
+				const lastEntry = this.sessionManager.getLeafEntry();
 				if (lastEntry?.type === "compaction") {
 					throw new Error("Already compacted");
 				}
@@ -2998,13 +3038,15 @@ export class AgentSession {
 					entry.sourceEntry.id === assistantEntryId &&
 					entry.messages.some((message) => message.role === "assistant"),
 			);
-		const branch = this.sessionManager.getBranch();
+		const branch = this.sessionManager.getActiveBranchMetadata();
 		const assistantIndex = assistantEntryId ? branch.findIndex((entry) => entry.id === assistantEntryId) : -1;
 		const entriesAfterAssistant = assistantIndex >= 0 ? branch.slice(assistantIndex + 1) : [];
 		const hasPostAssistantContextEdit = entriesAfterAssistant.some((entry) => entry.type === "context_edit");
 		const latestAssistantEdit = entriesAfterAssistant
+			.filter((entry) => entry.type === "context_edit")
+			.map((entry) => this.sessionManager.getEntry(entry.id))
 			.filter(
-				(entry): entry is ContextEditEntry => entry.type === "context_edit" && entry.targetId === assistantEntryId,
+				(entry): entry is ContextEditEntry => entry?.type === "context_edit" && entry.targetId === assistantEntryId,
 			)
 			.at(-1);
 		const assistantRetainedForExplicitRecovery =
@@ -3112,7 +3154,7 @@ export class AgentSession {
 			}
 
 			const pathEntries = this.sessionManager.getActiveContextEntries();
-			const preparation = prepareCompaction(pathEntries, settings);
+			const preparation = prepareCompaction(this.sessionManager, settings);
 			if (!preparation) {
 				return false;
 			}
@@ -4229,12 +4271,20 @@ export class AgentSession {
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return undefined;
 
+		const latestCompaction = this.sessionManager.getLatestActiveCompaction();
+		if (
+			!latestCompaction &&
+			this.sessionManager.getRecentActiveEntries({ type: "context_edit", limit: 1 }).length === 0
+		) {
+			const { tokens } = estimateContextTokensReverse(this.agent.iterateMessagesReverse(), this.agent.messageCount);
+			return { tokens, contextWindow, percent: (tokens / contextWindow) * 100 };
+		}
+
 		// After compaction, the last assistant usage reflects pre-compaction context size.
 		// We can only trust usage from an assistant that responded after the latest compaction.
 		// If no such assistant exists, context token count is unknown until the next LLM response.
 		const projection = this.sessionManager.buildSessionProjection();
-		const branch = this.sessionManager.getBranch();
-		const latestCompaction = getLatestCompactionEntry(branch);
+		const branch = this.sessionManager.getActiveBranchMetadata();
 
 		if (latestCompaction) {
 			const projectedAssistants = new Set(

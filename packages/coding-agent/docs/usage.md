@@ -45,7 +45,8 @@ Windows Terminal reserves some Alt shortcuts. See [Terminal Setup](terminal-setu
 
 Type `/` to search the available commands. The commands you will use most often are:
 
-- `/model` selects a model. Press `Ctrl+L` to open the same selector.
+- `/model` selects a model. Press `Ctrl+L` to open the same selector; `Ctrl+S` in the picker saves the startup default.
+- `/scoped-models` selects exact provider/model identities for `Ctrl+P` cycling. Models discovered later remain excluded until selected.
 - `/thinking` selects how much reasoning the current model uses. Press `Shift+Tab` to cycle through supported levels.
 - `/login` and `/logout` manage provider access.
 - `/settings` changes common preferences.
@@ -77,7 +78,7 @@ Use `!!` when you want to run a command without sending its output to the model.
 
 ## Copy, export, or share results
 
-Press `Ctrl+X` or run `/copy` to copy the last assistant response. Use `/export` to save the session as HTML or JSONL.
+Press `Ctrl+X` or run `/copy` to copy the last assistant response. Use `/export` to save the session as HTML or JSONL. HTML export publishes atomically and refuses to replace an existing path; choose a new filename or remove the old export first.
 
 Use `/share` to upload the session and get a viewer link. With Radius authentication, the artifact is visible to your Radius organization. Otherwise, Pi creates a private GitHub gist through the GitHub CLI. Review the session first because it can contain prompts, tool output, file contents, and credentials exposed during the conversation.
 

@@ -30,6 +30,7 @@ import {
 	type CompactionEntry,
 	type ProjectedSessionEntry,
 	type SessionEntry,
+	type SessionManager,
 	type SessionProjection,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
@@ -265,7 +266,7 @@ export function estimateContextTokensReverse(
 /** Estimate projected context without trusting usage captured before a later edit or compaction. */
 export function estimateProjectedContextTokens(
 	projection: SessionProjection,
-	branchEntries: SessionEntry[],
+	branchEntries: readonly { id: string; type: string }[],
 ): ContextUsageEstimate {
 	const estimate = estimateContextTokens(projection.messages);
 	if (estimate.lastUsageIndex !== null) {
@@ -909,14 +910,15 @@ function findProjectedCutPoint(
 }
 
 export function prepareCompaction(
-	pathEntries: SessionEntry[],
+	path: SessionEntry[] | SessionManager,
 	settings: CompactionSettings,
 ): CompactionPreparation | undefined {
+	const pathEntries = Array.isArray(path) ? path : path.getActiveBranchMetadata();
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
 
-	const projection = buildSessionProjection(pathEntries);
+	const projection = Array.isArray(path) ? buildSessionProjection(path) : path.buildSessionProjection();
 	const projectedEntries = projection.entries;
 	const sourceEntries = projectedEntries.map((entry) => entry.sourceEntry);
 	// The newest compaction is projected first. Older compaction entries can still

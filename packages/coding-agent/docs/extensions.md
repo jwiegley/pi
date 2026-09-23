@@ -49,27 +49,6 @@ Use a single file for a small extension and a directory for a multi-file impleme
 
 Reload replaces the extension runtime, so code after `await ctx.reload()` must not reuse state from the old runtime. Only personal and explicit command-line extensions can participate in the `project_trust` event that runs before project extensions load.
 
-### Tool renderer wrappers
-
-`pi.registerToolRenderer(wrapper)` wraps the effective `renderShell`, `renderCall`, and `renderResult` slots for every tool. Wrappers run in extension load order and receive the output of earlier wrappers. A custom tool that replaces a built-in tool inherits any renderer slots it omits before wrappers run.
-
-The returned object may change renderer slots only. Tool execution, parameters, descriptions, prompt metadata, and active state remain unchanged. A throwing wrapper or invalid return is reported as an extension error; later wrappers still run.
-
-```typescript
-pi.registerToolRenderer((tool, renderers) => {
-  if (tool.name !== "bash" || !renderers.renderResult) return renderers;
-
-  const renderResult = renderers.renderResult;
-  return {
-    ...renderers,
-    renderResult(result, options, theme, context) {
-      return renderResult(result, options, theme, context);
-    },
-  };
-});
-```
-
-For session history, use `ctx.sessionManager.getEntriesPage()`, `getTreePage()`, targeted lookups, or iterators. `getEntries()` and `getTree()` are deprecated compatibility APIs that materialize complete history.
 
 <a id="understand-the-lifecycle"></a>
 
@@ -201,6 +180,26 @@ pi.on("tool_call", async (event, ctx) => {
 
 A tool that orchestrates other tools can adjust what the model sees while it is active with `prepareLoadout(loadout)`. It runs whenever the active tools change and receives the declared tools, the callable tools, and every registered tool with its exposure and namespace. It returns replacement `descriptions` for declared tools (including its own) and `hiddenDeclarations`: active tools whose declarations requests leave out while they stay active and callable. `codemode` and `tool_search` use only this hook, `exposure`, and `ctx.executeTool()`, so another tool can implement the same behavior under a different name.
 
+### Tool renderer wrappers
+
+`pi.registerToolRenderer(wrapper)` wraps the effective `renderShell`, `renderCall`, and `renderResult` slots for every tool. Wrappers run in extension load order and receive the output of earlier wrappers. A custom tool that replaces a built-in tool inherits any renderer slots it omits before wrappers run.
+
+The returned object may change renderer slots only. Tool execution, parameters, descriptions, prompt metadata, and active state remain unchanged. A throwing wrapper or invalid return is reported as an extension error; later wrappers still run.
+
+```typescript
+pi.registerToolRenderer((tool, renderers) => {
+  if (tool.name !== "bash" || !renderers.renderResult) return renderers;
+
+  const renderResult = renderers.renderResult;
+  return {
+    ...renderers,
+    renderResult(result, options, theme, context) {
+      return renderResult(result, options, theme, context);
+    },
+  };
+});
+```
+
 ### Activate tools dynamically
 
 Register every tool first, keep optional tools inactive, and use `pi.setActiveTools()` from a loader tool to select the desired active tools. Names must already be registered; unknown names are ignored.
@@ -229,6 +228,8 @@ The built-in MCP support connects registered servers. When nothing does, because
 `ExtensionContext` provides the working directory, mode, UI, session manager, model runtime, abort signal, context usage, and controls for compaction and shutdown.
 Use `ctx.modelRegistry.streamSimple()` for provider-neutral nested model calls.
 
+`ctx.scopedModels` is the read-only intersection of the configured scope and the available catalog. CLI `--models` patterns resolve once into exact identities retained across session replacement. Persisted `enabledModels` contains exact `provider/model` identities re-resolved as catalogs change. An empty list can mean disabled scoping or an explicit scope with no available models. Each entry is `{ model, thinkingLevel? }`.
+
 Command handlers receive `ExtensionCommandContext`, which adds operations for waiting until idle, reloading, tree navigation, and session replacement.
 These operations are command-only because calling them from lifecycle handlers can deadlock the runtime.
 
@@ -251,6 +252,8 @@ Choose storage based on how state participates in the conversation:
 Reconstruct branch-sensitive state from `ctx.sessionManager.getBranch()` during `session_start`.
 Do not rebuild it from every file entry because abandoned branches represent alternative histories.
 Register an entry or message renderer when custom stored content should appear in the transcript.
+
+For session history, use `ctx.sessionManager.getEntriesPage()`, `getTreePage()`, targeted lookups, or iterators. `getEntries()` and `getTree()` are deprecated compatibility APIs that materialize complete history.
 
 <a id="custom-ui"></a>
 <a id="mode-behavior"></a>

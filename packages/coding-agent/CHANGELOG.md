@@ -17,6 +17,8 @@
 - Fixed deferred footer renders retaining a replaced session after its history store closes.
 - Fixed concurrent first opens misclassifying a partially initialized session lock database as foreign.
 - Fixed persisted model scopes expanding provider globs and admitting newly registered models that were never explicitly selected.
+- Preserved deferred indexed history, context edits, recovery, and task-turn ownership across the v0.87.1 context-boundary update.
+- Fixed context-with-system-only extensions being skipped by the context fast path.
 
 ## [0.99.1] - 2026-09-29
 

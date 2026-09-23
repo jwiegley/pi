@@ -295,6 +295,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 			{ role: "user", content: [{ type: "text", text: "another prompt" }], timestamp: Date.now() + 500 },
 			errorAssistant,
 		];
+		for (const message of messages) {
+			if (message.role === "user" || message.role === "assistant") sessionManager.appendMessage(message);
+		}
 		let materializations = 0;
 		let reverseReads = 0;
 		session.agent.setMessageSource({

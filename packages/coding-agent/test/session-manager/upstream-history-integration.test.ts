@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, getCurrentSystemMessage, type SystemMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { SessionManager } from "../../src/core/session-manager.ts";
+import { buildSessionProjection, SessionManager } from "../../src/core/session-manager.ts";
 import { getUsageCostBreakdown } from "../../src/core/usage-totals.ts";
 
 describe("upstream behavior with bounded history", () => {
@@ -154,6 +154,67 @@ describe("upstream behavior with bounded history", () => {
 				"compactionSummary",
 				"user",
 			]);
+		} finally {
+			manager.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it.each([false, true])("projects branch-local edits consistently with deferred payloads=%s", (large) => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-history-edits-"));
+		const manager = SessionManager.create(dir, dir);
+		const verify = (session: SessionManager) => {
+			const expected = buildSessionProjection(session.getBranch(), session.getLeafId()).messages;
+			const source = session.buildSessionContextSource().messages;
+			expect(session.buildSessionProjection().messages).toEqual(expected);
+			expect(source.length).toBe(expected.length);
+			expect(source.materialize()).toEqual(expected);
+			expect([...source.iterateReverse()]).toEqual([...expected].reverse());
+			expect(source.last()).toEqual(expected.at(-1));
+			for (const role of ["user", "assistant", "custom", "system", "compactionSummary"] as const) {
+				expect(source.last(role)).toEqual([...expected].reverse().find((message) => message.role === role));
+			}
+			return expected;
+		};
+		try {
+			manager.appendMessage({ role: "system", content: "rules", timestamp: 1 });
+			const user = manager.appendMessage({
+				role: "user",
+				content: large ? "x".repeat(9 * 1024 * 1024) : "original",
+				timestamp: 2,
+			});
+			const assistant = manager.appendMessage(fauxAssistantMessage("answer"));
+			const before = manager.buildSessionContextSource().messages;
+			const original = before.materialize();
+			manager.appendContextEdit(user, { content: "replacement" });
+			manager.appendContextEdit(assistant, null);
+			expect(verify(manager).filter((message) => message.role === "user")).toMatchObject([
+				{ content: "replacement" },
+			]);
+			expect(before.materialize()).toEqual(original);
+			expect(before.length).toBe(original.length);
+			manager.appendContextEdit(user, null);
+			expect(verify(manager).map((message) => message.role)).toEqual(["system"]);
+			manager.appendContextEdit(user, { content: "restored" });
+			verify(manager);
+			manager.appendCompaction("first", user, 100);
+			verify(manager);
+			manager.appendCompaction("second", user, 100);
+			expect(verify(manager).filter((message) => message.role === "compactionSummary")).toHaveLength(1);
+			manager.appendCompaction("retain none", null, 100);
+			manager.appendContextEdit(user, null);
+			expect(verify(manager).map((message) => message.role)).toEqual(["system", "compactionSummary"]);
+			manager.branch(assistant);
+			expect(verify(manager)).toEqual(original);
+			manager.appendContextEdit(user, { content: "other branch" });
+			const expected = verify(manager);
+			manager.close();
+			const reopened = SessionManager.open(manager.getSessionFile()!);
+			try {
+				expect(verify(reopened)).toEqual(expected);
+			} finally {
+				reopened.close();
+			}
 		} finally {
 			manager.close();
 			rmSync(dir, { recursive: true, force: true });

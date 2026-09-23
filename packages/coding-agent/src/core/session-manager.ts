@@ -678,7 +678,7 @@ export function buildContextEntries(
  * If leafId is provided, walks from that entry to root.
  * Handles compaction and branch summaries along the path.
  */
-function projectContextEntry(entry: SessionEntry, edit: ContextEditEntry | undefined): AgentMessage[] {
+function projectContextEntry(entry: SessionEntry, edit?: ContextEditEntry): AgentMessage[] {
 	const messages = sessionEntryToContextMessages(entry);
 	if (!edit) return messages;
 	const replacement = edit.replacement;
@@ -710,28 +710,28 @@ export function buildSessionProjection(
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
 	const contextEntries = buildContextEntries(entries, leafId, byId);
-	const edits = new Map<string, ContextEditEntry>();
-	for (const entry of contextEntries) {
-		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
-	}
-	const projectedEntries = contextEntries.map(
-		(sourceEntry, index): ProjectedSessionEntry => ({
-			sourceEntry,
-			// buildContextEntries() may retain an older compaction entry because its
-			// raw ID lies inside the newest retained range. Only the newest compaction
-			// at index zero contributes a checkpoint and summary.
-			messages:
-				sourceEntry.type === "compaction" && index > 0
-					? []
-					: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
-		}),
-	);
+	const projectedEntries = projectSessionContextEntries(contextEntries);
 	return {
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),
 		thinkingLevel,
 		model,
 	};
+}
+
+function projectSessionContextEntries(contextEntries: SessionEntry[]): ProjectedSessionEntry[] {
+	const edits = new Map<string, ContextEditEntry>();
+	for (const entry of contextEntries) {
+		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
+	}
+	return contextEntries.map((sourceEntry, index) => ({
+		sourceEntry,
+		// Only the newest compaction contributes its checkpoint and summary.
+		messages:
+			sourceEntry.type === "compaction" && index > 0
+				? []
+				: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
+	}));
 }
 
 /** Build the finalized model context from the canonical session projection. */
@@ -2514,9 +2514,10 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildSessionProjection(): SessionProjection {
-		return this.historyStore
-			? buildSessionProjection(this.historyStore.getBranch(), this.leafId)
-			: buildSessionProjection(this.getEntries(), this.leafId, this.byId);
+		const entries = projectSessionContextEntries(this.buildContextEntries());
+		const { thinkingLevel, model } =
+			this.historyStore?.getEffectiveContextSettings() ?? getSessionContextSettings(this.getBranch());
+		return { entries, messages: entries.flatMap((entry) => entry.messages), thinkingLevel, model };
 	}
 
 	buildSessionContext(): SessionContext {
@@ -2534,16 +2535,23 @@ export class SessionManager {
 	}
 
 	/** Deferred context source for automatic startup and branch navigation paths. */
-	buildSessionContextSource(): SessionContextSource {
+	buildSessionContextSource(onMessage?: (message: AgentMessage, entryId: string) => void): SessionContextSource {
 		if (this.historyStore) {
 			const { thinkingLevel, model } = this.historyStore.getEffectiveContextSettings();
 			return {
-				messages: this.historyStore.getActiveContextMessageSource(sessionEntryToContextMessages),
+				messages: this.historyStore.getActiveContextMessageSource((entry, edit) => {
+					const messages = projectContextEntry(entry, edit);
+					for (const message of messages) onMessage?.(message, entry.id);
+					return messages;
+				}),
 				thinkingLevel,
 				model,
 			};
 		}
-		const context = buildSessionContext(this.getEntries(), this.leafId, this.byId);
+		const context = this.buildSessionProjection();
+		for (const entry of context.entries) {
+			for (const message of entry.messages) onMessage?.(message, entry.sourceEntry.id);
+		}
 		const messages = context.messages;
 		return {
 			messages: {
