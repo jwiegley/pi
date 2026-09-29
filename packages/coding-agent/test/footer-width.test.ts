@@ -64,17 +64,25 @@ function createSession(options: {
 		});
 	}
 
-	const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-	for (const usageEntry of [options.usage, options.branchUsage, options.compactionUsage, options.toolUsage]) {
-		if (!usageEntry) continue;
-		usageTotals.input += usageEntry.input;
-		usageTotals.output += usageEntry.output;
-		usageTotals.cacheRead += usageEntry.cacheRead;
-		usageTotals.cacheWrite += usageEntry.cacheWrite;
-		usageTotals.cost += usageEntry.cost.total;
-	}
-	const promptTokens = usage ? usage.input + usage.cacheRead + usage.cacheWrite : 0;
-	const latestCacheHitRate = usage && promptTokens > 0 ? (usage.cacheRead / promptTokens) * 100 : undefined;
+	const getHistorySummary = () => {
+		const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		let latestCacheHitRate: number | undefined;
+		for (const entry of entries) {
+			const message = entry.message as { role: string; usage?: AssistantUsage } | undefined;
+			const entryUsage = message ? message.usage : (entry.usage as AssistantUsage | undefined);
+			if (!entryUsage) continue;
+			usageTotals.input += entryUsage.input;
+			usageTotals.output += entryUsage.output;
+			usageTotals.cacheRead += entryUsage.cacheRead;
+			usageTotals.cacheWrite += entryUsage.cacheWrite;
+			usageTotals.cost += entryUsage.cost.total;
+			if (message?.role === "assistant") {
+				const promptTokens = entryUsage.input + entryUsage.cacheRead + entryUsage.cacheWrite;
+				latestCacheHitRate = promptTokens > 0 ? (entryUsage.cacheRead / promptTokens) * 100 : undefined;
+			}
+		}
+		return { usage: usageTotals, latestCacheHitRate };
+	};
 
 	const session = {
 		state: {
@@ -91,7 +99,7 @@ function createSession(options: {
 			getEntryCount: () => entries.length,
 			getSessionId: () => "test-session",
 			getLeafId: () => null,
-			getHistorySummary: () => ({ usage: usageTotals, latestCacheHitRate }),
+			getHistorySummary,
 			getSessionName: () => options.sessionName,
 			getCwd: () => "/tmp/project",
 		},

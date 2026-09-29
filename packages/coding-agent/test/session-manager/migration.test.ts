@@ -120,9 +120,10 @@ interface ChildRun {
 }
 
 function launchWorker(workerPath: string, args: string[], nodeArgs: string[] = []): ChildRun {
-	const child = spawn(process.execPath, [...nodeArgs, "--import", "tsx", workerPath, ...args], {
+	const sourceResolver = join(repoRoot, "packages/coding-agent/src/experimental/source-resolver.ts");
+	const child = spawn(process.execPath, [...nodeArgs, "--import", sourceResolver, workerPath, ...args], {
 		cwd: repoRoot,
-		env: { ...process.env, PI_OFFLINE: "1", TSX_TSCONFIG_PATH: join(repoRoot, "tsconfig.json") },
+		env: { ...process.env, PI_OFFLINE: "1" },
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 	let stdout = "";

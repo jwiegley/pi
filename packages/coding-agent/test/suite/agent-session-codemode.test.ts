@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import type { CustomEntry } from "../../src/core/session-manager.ts";
 import { createToolDefinitionFromAgentTool } from "../../src/core/tools/tool-definition-wrapper.ts";
@@ -497,6 +497,20 @@ describe("codemode options and store", () => {
 		// Branch from the first prompt: the store entries written after it are on another path.
 		harness.sessionManager.branch(firstPrompt.id);
 		expect(resultText(await run(harness, increment))).toBe("1");
+	});
+
+	it("loads the store from indexed history without hydrating the branch", async () => {
+		const harness = await createHarness({
+			initialActiveToolNames: ["codemode"],
+			extensionFactories: [createCodemodeExtension()],
+			persistSession: true,
+		});
+		harnesses.push(harness);
+		expect(resultText(await run(harness, increment))).toBe("1");
+
+		const getBranch = vi.spyOn(harness.sessionManager, "getBranch");
+		expect(resultText(await run(harness, increment))).toBe("2");
+		expect(getBranch).not.toHaveBeenCalled();
 	});
 
 	it("folds store entries from the root, ignoring malformed data", () => {

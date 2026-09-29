@@ -19,6 +19,8 @@
 - Fixed persisted model scopes expanding provider globs and admitting newly registered models that were never explicitly selected.
 - Preserved deferred indexed history, context edits, recovery, and task-turn ownership across the v0.87.1 context-boundary update.
 - Fixed context-with-system-only extensions being skipped by the context fast path.
+- Preserved bounded indexed history reads across the v0.99.1 virtual model, codemode store, nested tool call, and footer usage cache updates.
+- Fixed indexed branched sessions forked at a user message deferring their file until the first assistant response.
 
 ## [0.99.1] - 2026-09-29
 

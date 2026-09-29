@@ -2584,6 +2584,7 @@ export class SessionManager {
 
 	/** Number of session entries (excludes header), without copying them like `getEntries()`. */
 	getEntryCount(): number {
+		if (this.historyStore) return this.historyStore.getHistorySummary().entryCount;
 		return this.byId.size;
 	}
 
@@ -2823,7 +2824,7 @@ export class SessionManager {
 				candidateFd = openSync(candidatePath, "wx", 0o600);
 				writeJsonLineSync(candidateFd, header);
 				let parentId: string | null = null;
-				let hasAssistant = false;
+				let hasConversation = false;
 				let retainedEntryCount = 0;
 				let retainedBytes = 0;
 				sourceStore.iterateBranchEntries(leafId, (entry) => {
@@ -2849,8 +2850,9 @@ export class SessionManager {
 					retainedEntryCount++;
 					retainedBytes += line.length;
 					parentId = next.id;
-					if (next.type === "message" && next.message.role === "assistant") {
-						hasAssistant = true;
+					// Same rule as _hasConversation(): a user message is enough to write the file (#10000).
+					if (next.type === "message" && (next.message.role === "user" || next.message.role === "assistant")) {
+						hasConversation = true;
 					}
 				});
 
@@ -2885,7 +2887,7 @@ export class SessionManager {
 				closeSync(candidateFd);
 				candidateFd = undefined;
 
-				if (!hasAssistant) {
+				if (!hasConversation) {
 					if (retainedEntryCount > MAX_DEFERRED_BRANCH_ENTRIES || retainedBytes > MAX_DEFERRED_BRANCH_BYTES) {
 						throw new Error(
 							`Cannot defer branched session with ${retainedEntryCount} entries and ${retainedBytes} bytes; ` +

@@ -9,12 +9,18 @@ import {
 	InMemoryModelsStore,
 	type Model,
 } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import type { ModelRouteRequest, VirtualModelDefinition } from "../src/core/virtual-models.ts";
+import {
+	getBranchSelection,
+	getVirtualModelState,
+	type ModelRouteRequest,
+	VIRTUAL_MODEL_STATE_ENTRY,
+	type VirtualModelDefinition,
+} from "../src/core/virtual-models.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 async function createRuntime(requests: ModelRouteRequest[] = []) {
@@ -377,5 +383,42 @@ describe("createAgentSession with virtual models", () => {
 
 		await session.prompt("again");
 		expect(lastModelChange()).toMatchObject({ provider: "faux", modelId: "small" });
+	});
+});
+
+describe("virtual model branch reads on indexed history", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-virtual-indexed-"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("reads the selection and router state without hydrating the branch", async () => {
+		const { runtime } = await createRuntime();
+		const getModel = (provider: string, modelId: string) => runtime.getModel(provider, modelId);
+		const sessionManager = SessionManager.create(tempDir, tempDir);
+		sessionManager.appendModelChange("faux", "small");
+		sessionManager.appendMessage({ role: "user", content: "hi", timestamp: 1 });
+		sessionManager.appendMessage(assistantFrom(runtime.getModel("faux", "large")!, "hello"));
+		const getBranch = vi.spyOn(sessionManager, "getBranch");
+
+		// A physical model_change yields to the physical response after it.
+		expect(getBranchSelection(sessionManager, getModel)).toEqual({ provider: "faux", modelId: "large" });
+
+		// A virtual model_change holds over the physical responses it routed to.
+		sessionManager.appendModelChange("router", "auto");
+		sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, { provider: "router", modelId: "auto", state: 1 });
+		sessionManager.appendMessage(assistantFrom(runtime.getModel("faux", "small")!, "routed"));
+		sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, { provider: "router", modelId: "other", state: 2 });
+		expect(getBranchSelection(sessionManager, getModel)).toEqual({ provider: "router", modelId: "auto" });
+		expect(getVirtualModelState(sessionManager, "router", "auto")).toBe(1);
+
+		// An unregistered virtual model does not hold, so the last physical response wins.
+		expect(getBranchSelection(sessionManager, () => undefined)).toEqual({ provider: "faux", modelId: "small" });
+		expect(getBranch).not.toHaveBeenCalled();
 	});
 });

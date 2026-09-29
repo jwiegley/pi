@@ -386,8 +386,8 @@ describe("AgentSession prompt characterization", () => {
 		});
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("task response")]);
-		const steer = vi.spyOn(harness.session, "steer").mockResolvedValue(undefined);
-		const followUp = vi.spyOn(harness.session, "followUp").mockResolvedValue(undefined);
+		const steer = vi.spyOn(harness.session, "steer").mockResolvedValue("queued");
+		const followUp = vi.spyOn(harness.session, "followUp").mockResolvedValue("queued");
 		const handle = extensionApi!.startTaskTurn("task prompt");
 		expect(handle.id).toMatch(/^task-turn-/);
 		expect(() => extensionApi!.startTaskTurn("interleaved")).toThrow("active task turn");

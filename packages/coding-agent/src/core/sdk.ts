@@ -209,7 +209,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Assistant messages name the physical model that answered, so a virtual selection is only in
 	// model_change entries.
-	const sessionModel = getBranchSelection(sessionManager.getBranch(), (provider, modelId) =>
+	const sessionModel = getBranchSelection(sessionManager, (provider, modelId) =>
 		modelRuntime.getModel(provider, modelId),
 	);
 

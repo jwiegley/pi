@@ -705,17 +705,10 @@ describe("Agent", () => {
 			[
 				"--expose-gc",
 				"--import",
-				import.meta.resolve("tsx"),
+				new URL("../../coding-agent/src/experimental/source-resolver.ts", import.meta.url).href,
 				fileURLToPath(new URL("./fixtures/agent-message-retention.ts", import.meta.url)),
 			],
-			{
-				encoding: "utf8",
-				timeout: 20_000,
-				env: {
-					...process.env,
-					TSX_TSCONFIG_PATH: fileURLToPath(new URL("../../../tsconfig.json", import.meta.url)),
-				},
-			},
+			{ encoding: "utf8", timeout: 20_000 },
 		);
 		expect(result.error).toBeUndefined();
 		expect(result.status, result.stderr).toBe(0);

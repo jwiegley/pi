@@ -144,11 +144,11 @@ import {
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
-import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
+import { combineUsage } from "./usage-totals.ts";
 import {
-	findLatestResponse,
 	getBranchSelection,
 	getVirtualModelState,
+	isSuccessfulResponse,
 	isVirtualModel,
 	VIRTUAL_MODEL_STATE_ENTRY,
 	type VirtualModelStateData,
@@ -571,7 +571,7 @@ export class AgentSession {
 	}> {
 		// Route a virtual model first: summaries size their input and output from the model they get.
 		const { model, thinkingLevel } = isVirtualModel(selectedModel)
-			? await this._modelRuntime.resolveModel(selectedModel, convertToLlm(this.messages), {
+			? await this._modelRuntime.resolveModel(selectedModel, convertToLlm(this.agent.getMessagesSnapshot()), {
 					reason: "direct",
 					thinkingLevel: this.thinkingLevel,
 					signal,
@@ -619,7 +619,7 @@ export class AgentSession {
 		const model = this.model;
 		if (!model) return;
 		const getModel = (provider: string, modelId: string) => this._modelRuntime.getModel(provider, modelId);
-		const recorded = getBranchSelection(this.sessionManager.getBranch(), getModel);
+		const recorded = getBranchSelection(this.sessionManager, getModel);
 		if (!recorded || (recorded.provider === model.provider && recorded.modelId === model.id)) return;
 		const recordedModel = getModel(recorded.provider, recorded.modelId);
 		if (!isVirtualModel(model) && !(recordedModel && isVirtualModel(recordedModel))) return;
@@ -738,7 +738,7 @@ export class AgentSession {
 				return runToolCall(toolCall, {
 					tools: this._getCallableTools(),
 					assistantMessage,
-					context: { messages: this.agent.state.messages, tools: this.agent.state.tools },
+					context: { messages: this.agent.getMessagesSnapshot(), tools: this.agent.state.tools },
 					beforeToolCall: (context) => this._beforeToolCall(context, parentId),
 					afterToolCall: (context) => this._afterToolCall(context, parentId),
 					signal,
@@ -808,7 +808,7 @@ export class AgentSession {
 			// start a turn; extension messages can follow them, e.g. from before_agent_start.
 			const lastResponse = context.messages.findLastIndex((message) => message.role === "assistant");
 			const userTurn = context.messages.slice(lastResponse + 1).some((message) => message.role === "user");
-			const state = getVirtualModelState(this.sessionManager.getBranch(), model.provider, model.id);
+			const state = getVirtualModelState(this.sessionManager, model.provider, model.id);
 			const route = await this._modelRuntime.resolveModel(model, convertToLlm(context.messages), {
 				reason: failed ? "retry" : userTurn ? "user" : "continuation",
 				thinkingLevel,
@@ -1435,7 +1435,7 @@ export class AgentSession {
 	/** Under a virtual selection, the physical model and thinking level of the latest successful response. */
 	get routedModel(): { model: Model<any>; thinkingLevel?: ThinkingLevel } | undefined {
 		if (!this.model || !isVirtualModel(this.model)) return undefined;
-		const latest = findLatestResponse(this.agent.state.messages);
+		const latest = this.agent.findLastMessage(isSuccessfulResponse);
 		const model = latest && this._modelRuntime.getPhysicalModel(latest.provider, latest.model);
 		return model && { model, thinkingLevel: latest?.thinkingLevel };
 	}

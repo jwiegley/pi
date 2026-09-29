@@ -901,6 +901,18 @@ store.close();
 		manager.close();
 	});
 
+	it("counts entries after the indexed store replaces the in-memory index", () => {
+		const root = createRoot();
+		const manager = SessionManager.create(root, root, { id: "entry-count-parity" });
+		manager.appendThinkingLevelChange("high");
+		expect(manager.getEntryCount()).toBe(1);
+		manager.appendMessage({ role: "user", content: "persist", timestamp: 1 });
+		manager.appendCustomEntry("test", { value: 1 });
+		expect(manager.getEntryCount()).toBe(3);
+		expect(manager.getEntryCount()).toBe(manager.getEntries().length);
+		manager.close();
+	});
+
 	it("keeps append and message ordinals stable across persistence", () => {
 		const root = createRoot();
 		const manager = SessionManager.create(root, root, { id: "metadata-parity" });

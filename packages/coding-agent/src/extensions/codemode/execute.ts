@@ -20,7 +20,7 @@ import {
 } from "@earendil-works/pi-codemode";
 import { getCodemodeWorkerUrl, getQuickJSWasmPath } from "../../config.ts";
 import type { ExtensionToolContext } from "../../core/extensions/types.ts";
-import type { SessionEntry } from "../../core/session-manager.ts";
+import type { ReadonlySessionManager, SessionEntry } from "../../core/session-manager.ts";
 import { combineUsage } from "../../core/usage-totals.ts";
 import { Bm25Ranker, createToolSearchDocument, DEFAULT_TOOL_SEARCH_LIMIT } from "../tool-search/tool.ts";
 import {
@@ -124,6 +124,15 @@ export function readCodemodeStore(branch: readonly SessionEntry[]): Record<strin
 		for (const [key, value] of Object.entries(entry.data.set)) store.set(key, value);
 	}
 	return Object.fromEntries(store);
+}
+
+/** The `codemode-store` entries on the active branch, from the root. Other entries are not hydrated. */
+function getCodemodeStoreEntries(sessionManager: ReadonlySessionManager): SessionEntry[] {
+	return sessionManager.getActiveBranchMetadata().flatMap((metadata) => {
+		if (metadata.type !== "custom" || metadata.customType !== CODEMODE_STORE_ENTRY_TYPE) return [];
+		const entry = sessionManager.getEntry(metadata.id);
+		return entry ? [entry] : [];
+	});
 }
 
 /** Default token budget for script output. */
@@ -282,7 +291,7 @@ export async function executeCodemode(
 
 	let result: CodemodeResult;
 	try {
-		const store = ctx ? readCodemodeStore(ctx.sessionManager.getBranch()) : {};
+		const store = ctx ? readCodemodeStore(getCodemodeStoreEntries(ctx.sessionManager)) : {};
 		result = await sandbox.execute(code, { signal, store });
 	} finally {
 		await sandbox.close();
