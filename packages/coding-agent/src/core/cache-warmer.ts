@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { getProviderEnvValue } from "@earendil-works/pi-ai/utils/provider-env";
 import type { ModelRuntime } from "./model-runtime.ts";
-import type { SessionEntry, SessionManager, UsageEntry } from "./session-manager.ts";
+import type { SessionManager, UsageEntry } from "./session-manager.ts";
 import type { CacheWarmingMode } from "./settings-manager.ts";
 
 /** Streaming warming never continues past this long after the real request that started it. */
@@ -55,18 +55,6 @@ export function getPromptCacheTtlMs(model: Model<Api>, options: SimpleStreamOpti
 export function isReplayable(model: Model<Api>, options: SimpleStreamOptions | undefined): boolean {
 	if (!options?.reasoning || model.api !== "anthropic-messages") return true;
 	return (model as Model<"anthropic-messages">).compat?.forceAdaptiveThinking === true;
-}
-
-/** Prompt size of the most recent real request on the branch, as reported by the provider. */
-function lastPromptTokens(entries: SessionEntry[]): number {
-	for (let index = entries.length - 1; index >= 0; index--) {
-		const entry = entries[index];
-		if (entry.type === "message" && entry.message.role === "assistant") {
-			const usage = entry.message.usage;
-			return usage.input + usage.cacheRead + usage.cacheWrite;
-		}
-	}
-	return 0;
 }
 
 function price(
@@ -163,7 +151,7 @@ export class CacheWarmer {
 	private run?: ActiveRun;
 	private inactive: CacheWarmingStatus;
 	private readonly models: Pick<ModelRuntime, "streamSimple">;
-	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">;
+	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getLatestMessage">;
 	private readonly getMode: () => CacheWarmingMode;
 	/** Lets extensions override `event.action`; failures fall back to pi's decision. */
 	private readonly decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction>;
@@ -172,7 +160,7 @@ export class CacheWarmer {
 
 	constructor(
 		models: Pick<ModelRuntime, "streamSimple">,
-		sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">,
+		sessionManager: Pick<SessionManager, "appendUsage" | "getLatestMessage">,
 		getMode: () => CacheWarmingMode,
 		decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction> = async (event) => event.action,
 	) {
@@ -377,7 +365,9 @@ export class CacheWarmer {
 
 	private evaluate(run: ActiveRun): CacheWarmingDecision {
 		const model = run.model;
-		const promptTokens = lastPromptTokens(this.sessionManager.getBranch());
+		const entry = this.sessionManager.getLatestMessage("assistant", { scope: "active" });
+		const usage = entry?.type === "message" && entry.message.role === "assistant" ? entry.message.usage : undefined;
+		const promptTokens = usage ? usage.input + usage.cacheRead + usage.cacheWrite : 0;
 		const cacheHitCost = price(model, { cacheRead: promptTokens });
 		const cacheMissCost = price(
 			model,

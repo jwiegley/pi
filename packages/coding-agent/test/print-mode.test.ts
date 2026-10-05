@@ -152,4 +152,23 @@ describe("runPrintMode", () => {
 		expect(exitCode).toBe(1);
 		expect(errorSpy).toHaveBeenCalled();
 	});
+
+	it("uses lastMessage without materializing session state", async () => {
+		const assistantMessage = createAssistantMessage({ text: "done" });
+		const runtimeHost = createRuntimeHost(assistantMessage);
+		const { session } = runtimeHost;
+		const state = session.state;
+		const stateGetter = vi.fn(() => state);
+		Object.defineProperties(session, {
+			lastMessage: { value: assistantMessage },
+			state: { get: stateGetter },
+		});
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(stateGetter).not.toHaveBeenCalled();
+	});
 });

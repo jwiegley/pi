@@ -4,7 +4,7 @@ import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import type { ContextUsage } from "../../../core/extensions/types.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
-import { addUsageToTotals, createUsageTotals, type UsageTotals } from "../../../core/usage-totals.ts";
+import type { UsageTotals } from "../../../core/usage-totals.ts";
 import { theme } from "../theme/theme.ts";
 
 /**
@@ -61,7 +61,7 @@ interface SessionStats {
  */
 export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
-	private session: AgentSession;
+	private session: AgentSession | undefined;
 	private footerData: ReadonlyFooterDataProvider;
 	private sessionStats?: SessionStats;
 
@@ -70,8 +70,16 @@ export class FooterComponent implements Component {
 		this.footerData = footerData;
 	}
 
-	setSession(session: AgentSession): void {
+	bindSession(session: AgentSession): void {
 		this.session = session;
+	}
+
+	setSession(session: AgentSession): void {
+		this.bindSession(session);
+	}
+
+	detachSession(): void {
+		this.session = undefined;
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -99,16 +107,16 @@ export class FooterComponent implements Component {
 	 * Entries are append-only and every append moves the leaf, so the results only change with the
 	 * session, leaf, entry count, or the model whose context window applies.
 	 */
-	private getSessionStats(): SessionStats {
-		const sessionManager = this.session.sessionManager;
+	private getSessionStats(session: AgentSession): SessionStats {
+		const sessionManager = session.sessionManager;
 		const entryCount = sessionManager.getEntryCount();
 		const sessionId = sessionManager.getSessionId();
 		const leafId = sessionManager.getLeafId();
-		const limitsModel = this.session.routedModel?.model ?? this.session.model;
+		const limitsModel = session.routedModel?.model ?? session.model;
 		const cached = this.sessionStats;
 		if (
 			cached &&
-			cached.session === this.session &&
+			cached.session === session &&
 			cached.sessionId === sessionId &&
 			cached.leafId === leafId &&
 			cached.entryCount === entryCount &&
@@ -118,31 +126,15 @@ export class FooterComponent implements Component {
 		}
 
 		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		const usageTotals = createUsageTotals();
-		let latestCacheHitRate: number | undefined;
-
-		for (const entry of sessionManager.getEntries()) {
-			if (entry.type === "usage") {
-				addUsageToTotals(usageTotals, entry.usage);
-			} else if (entry.type === "message" && entry.message.role === "assistant") {
-				addUsageToTotals(usageTotals, entry.message.usage);
-
-				const latestPromptTokens =
-					entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
-				latestCacheHitRate =
-					latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
-			} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
-				addUsageToTotals(usageTotals, entry.message.usage);
-			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
-				addUsageToTotals(usageTotals, entry.usage);
-			}
-		}
+		const historySummary = sessionManager.getHistorySummary();
+		const usageTotals = historySummary.usage;
+		const latestCacheHitRate = historySummary.latestCacheHitRate;
 
 		// Calculate context usage from session (handles compaction correctly).
 		// After compaction, tokens are unknown until the next LLM response.
-		const contextUsage = this.session.getContextUsage();
+		const contextUsage = session.getContextUsage();
 		this.sessionStats = {
-			session: this.session,
+			session,
 			sessionId,
 			leafId,
 			entryCount,
@@ -155,14 +147,20 @@ export class FooterComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		const state = this.session.state;
-		const { usageTotals, latestCacheHitRate, contextUsage } = this.getSessionStats();
+		// Session replacement closes the outgoing indexed history store. Capture
+		// the binding exactly once so a deferred render can neither observe a
+		// detached footer nor mix two sessions if a replacement binds mid-render.
+		const session = this.session;
+		if (!session) return [];
+
+		const state = session.state;
+		const { usageTotals, latestCacheHitRate, contextUsage } = this.getSessionStats(session);
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
 
 		// Replace home directory with ~
-		let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
+		let pwd = formatCwdForFooter(session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
 
 		// Add git branch if available
 		const branch = this.footerData.getGitBranch();
@@ -171,7 +169,7 @@ export class FooterComponent implements Component {
 		}
 
 		// Add session name if set
-		const sessionName = this.session.sessionManager.getSessionName();
+		const sessionName = session.sessionManager.getSessionName();
 		if (sessionName) {
 			pwd = `${pwd} • ${sessionName}`;
 		}
@@ -188,7 +186,7 @@ export class FooterComponent implements Component {
 
 		// Kimi Coding is subscription-backed despite using API-key authentication.
 		const usingSubscription = state.model
-			? state.model.provider === "kimi-coding" || this.session.modelRuntime.isUsingSubscription(state.model.provider)
+			? state.model.provider === "kimi-coding" || session.modelRuntime.isUsingSubscription(state.model.provider)
 			: false;
 		if (usageTotals.cost || usingSubscription) {
 			const costStr = `$${usageTotals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
@@ -238,7 +236,7 @@ export class FooterComponent implements Component {
 				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
 		}
 		// A virtual model routes each request; show where the latest response went.
-		const routed = this.session.routedModel;
+		const routed = session.routedModel;
 		if (routed) {
 			const level = routed.thinkingLevel ? ` • ${routed.thinkingLevel}` : "";
 			rightSideWithoutProvider += ` → ${routed.model.id}${level}`;
