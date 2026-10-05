@@ -90,6 +90,10 @@ npm run check
 
 Read [CONTRIBUTING.md](https://github.com/earendil-works/pi/blob/main/CONTRIBUTING.md) before opening an issue or pull request. It defines the contribution gate, issue quality bar, and required checks. Read [AGENTS.md](https://github.com/earendil-works/pi/blob/main/AGENTS.md) for repository-specific implementation, testing, dependency, and release rules.
 
+## Extension task turns
+
+Extensions that must own and correlate one current-session turn can call `pi.startTaskTurn()`. It refuses unless the session is idle, excludes unrelated prompts until completion, and returns a handle whose `completed` promise contains exactly that turn's messages plus distinct `steer()`, `followUp()`, and `abort()` controls.
+
 HTML exports are published without clobbering: the destination must not already exist.
 
 ## License
