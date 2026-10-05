@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added SQLite-backed bounded session history with paged navigation, streamed export, atomic migration, and lazy active transcripts.
+- Added extension task turns with distinct steer, follow-up, and abort controls.
+- Added provider-scoped request and idle timeouts, model-local default thinking levels, and extension tool-renderer wrappers.
+
+### Changed
+
+- Removed automatic startup model-catalog refresh and bundled Pi documentation paths from the default system prompt.
+
+### Fixed
+
+- Fixed persisted model scopes expanding provider globs and admitting newly registered models that were never selected.
+- Fixed deferred footer renders retaining a replaced session after its history store closes.
+- Fixed bash output files being returned before their writes completed.
+- Fixed extension overlay disposal closing a replacement overlay.
+
 ## [1.3.0] - 2026-10-15
 
 ### New Features
