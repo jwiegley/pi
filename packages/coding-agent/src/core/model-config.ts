@@ -55,6 +55,7 @@ const ModelDefinitionSchema = Type.Object({
 	api: Type.Optional(Type.String({ minLength: 1, description: "Overrides the provider api." })),
 	baseUrl: Type.Optional(Type.String({ minLength: 1, description: "Overrides the provider baseUrl." })),
 	reasoning: Type.Optional(Type.Boolean({ default: false, description: ModelFieldDescriptions.reasoning })),
+	defaultThinkingLevel: Type.Optional(Type.Literal("off")),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(ModelInputModalitySchema, { default: ["text"] })),
 	inputLimits: Type.Optional(ModelInputLimitsSchema),
@@ -75,6 +76,7 @@ const ModelDefinitionSchema = Type.Object({
 const ModelOverrideSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1, description: ModelFieldDescriptions.name })),
 	reasoning: Type.Optional(Type.Boolean({ description: ModelFieldDescriptions.reasoning })),
+	defaultThinkingLevel: Type.Optional(Type.Literal("off")),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(ModelInputModalitySchema)),
 	inputLimits: Type.Optional(ModelInputLimitsSchema),
