@@ -180,6 +180,28 @@ pi.on("tool_call", async (event, ctx) => {
 
 A tool that orchestrates other tools can adjust what the model sees while it is active with `prepareLoadout(loadout)`. It runs whenever the active tools change and receives the declared tools, the callable tools, and every registered tool with its exposure and namespace. It returns replacement `descriptions` for declared tools (including its own) and `hiddenDeclarations`: active tools whose declarations requests leave out while they stay active and callable. `codemode` uses only this hook, `exposure`, and `ctx.executeTool()`, so another tool can implement the same behavior under a different name.
 
+### Tool renderer wrappers
+
+`pi.registerToolRendererWrapper(wrapper)` wraps the effective `renderShell`, `renderCall`, and `renderResult` slots for every tool. Wrappers run in extension load order and receive the output of earlier wrappers. A custom tool that replaces a built-in tool inherits any renderer slots it omits before wrappers run. In the interactive transcript and HTML exports, resolvers choose renderers first, then wrappers apply once, including for unregistered tools. An unregistered tool's wrapper label defaults to its name.
+
+Fork extensions using the former `registerToolRenderer((tool, renderers) => ...)` wrapper API must rename that call to `registerToolRendererWrapper`. `registerToolRenderer` now accepts the upstream `(toolName, next)` resolver API; the two callback contracts are separate.
+
+The returned object may change renderer slots only. Tool execution, parameters, descriptions, prompt metadata, and active state remain unchanged. A throwing wrapper or invalid return is reported as an extension error; later wrappers still run.
+
+```typescript
+pi.registerToolRendererWrapper((tool, renderers) => {
+  if (tool.name !== "bash" || !renderers.renderResult) return renderers;
+
+  const renderResult = renderers.renderResult;
+  return {
+    ...renderers,
+    renderResult(result, options, theme, context) {
+      return renderResult(result, options, theme, context);
+    },
+  };
+});
+```
+
 ### Activate tools dynamically
 
 Register every tool first, keep optional tools inactive, and use `pi.setActiveTools()` from a loader tool to select the desired active tools. Names must already be registered; unknown names are ignored.
