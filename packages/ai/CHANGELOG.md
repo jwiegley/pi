@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added optional model-local default thinking levels for provider-specific defaults.
+
 ## [1.4.0] - 2026-10-21
 
 ### Breaking Changes
