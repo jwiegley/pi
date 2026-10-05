@@ -28,6 +28,10 @@ const SamplingParamsByThinkingLevelSchema = Type.Object({
 });
 
 const PositiveTokenCountSchema = Type.Number({ exclusiveMinimum: 0 });
+const ProviderTransportSchema = Type.Object({
+	requestTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 2147483647 })),
+	idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647 })),
+});
 
 const ModelDefinitionSchema = Type.Object({
 	id: Type.String({ minLength: 1 }),
@@ -73,6 +77,7 @@ const ProviderConfigSchema = Type.Object({
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
 	authHeader: Type.Optional(Type.Boolean()),
+	transport: Type.Optional(ProviderTransportSchema),
 	models: Type.Optional(Type.Array(ModelDefinitionSchema)),
 	modelOverrides: Type.Optional(Type.Record(Type.String(), ModelOverrideSchema)),
 });
