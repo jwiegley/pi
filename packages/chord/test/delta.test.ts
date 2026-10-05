@@ -16,6 +16,21 @@ import {
 } from "../src/delta/index.ts";
 
 describe("immutable tracker lifecycle", () => {
+	it("keeps 2,500 independent writes", () => {
+		const root: Record<string, number> = {};
+		for (let i = 0; i < 2_500; i++) root[`f${i}`] = i;
+		const tracker = track(root);
+		const change = tracker.beginChange();
+		for (let i = 0; i < 2_500; i++) change.state[`f${i}`] = i + 1;
+		const prepared = change.prepare();
+		expect(prepared.ops).toHaveLength(2_500);
+		expect(prepared.ops[0]).toEqual(["s", ["f0"], 1]);
+		expect(prepared.ops.at(-1)).toEqual(["s", ["f2499"], 2_500]);
+		expect(applyImmutable(root, prepared.ops)).toEqual(prepared.value);
+		tracker.adopt(prepared);
+		for (let i = 0; i < 2_500; i++) expect(tracker.value[`f${i}`]).toBe(i + 1);
+	});
+
 	it("keeps a draft alive across await and adopts only a prepared change", async () => {
 		const input = { count: 1, nested: { text: "a" }, values: [1] };
 		const tracker = track(input);
