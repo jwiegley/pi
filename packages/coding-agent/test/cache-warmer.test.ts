@@ -95,6 +95,15 @@ function fakeRuntime(
 	const usageManager = SessionManager.inMemory();
 	const appendUsage = vi.fn(usageManager.appendUsage.bind(usageManager));
 	const state = { mode: options.mode ?? "idle", branch: options.branch ?? branchWithPrompt(100_000) };
+	const history = {
+		appendUsage,
+		getLatestMessage: vi.fn(() =>
+			[...state.branch].reverse().find((entry) => entry.type === "message" && entry.message.role === "assistant"),
+		),
+		getBranch: () => {
+			throw new Error("warming must not hydrate the full branch");
+		},
+	};
 	const warmer = new CacheWarmer(
 		{
 			streamSimple: (model, _context, streamOptions) => {
@@ -104,7 +113,7 @@ function fakeRuntime(
 				} as unknown as AssistantMessageEventStream;
 			},
 		},
-		{ appendUsage, getBranch: () => state.branch },
+		history,
 		() => state.mode,
 		async (event) => {
 			events.push(event);
@@ -112,7 +121,7 @@ function fakeRuntime(
 		},
 	);
 	warmer.onWarmed = (entry) => warmedEntries.push(entry);
-	return { warmer, calls, events, warmedEntries, appendUsage, state };
+	return { warmer, calls, events, warmedEntries, appendUsage, state, history };
 }
 
 function request(model: Model<Api> = adaptiveModel, options: ModelsSimpleStreamOptions = {}): CacheWarmRequest {
@@ -142,6 +151,20 @@ describe("cache warming", () => {
 			isReplayable(adaptiveModel, { reasoning: "medium" }),
 			isReplayable(openaiModel, { reasoning: "medium" }),
 		]).toEqual([false, true, true, true]);
+	});
+
+	it("reads only the latest active assistant for status and refresh economics", async () => {
+		vi.useFakeTimers();
+		const { warmer, history, calls } = fakeRuntime();
+		try {
+			warmer.start(request(), current);
+			expect(warmer.status).toMatchObject({ state: "scheduled", decision: { economicsAvailable: true } });
+			await vi.advanceTimersByTimeAsync(270_000);
+			expect(calls).toHaveLength(1);
+			expect(history.getLatestMessage).toHaveBeenCalledWith("assistant", { scope: "active" });
+		} finally {
+			warmer.cancel();
+		}
 	});
 
 	it("replays profitable requests and preserves options across repeated refreshes", async () => {

@@ -10,6 +10,7 @@ import {
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
+	estimateContextTokensReverse,
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
@@ -268,6 +269,42 @@ describe("estimateContextTokens", () => {
 		expect(estimate.lastUsageIndex).toBe(1);
 		expect(estimate.trailingTokens).toBeGreaterThan(0);
 		expect(estimate.tokens).toBe(150 + estimate.trailingTokens);
+	});
+
+	it("estimates a newest-first stream without reading before the latest valid usage", () => {
+		const usageMessage = createAssistantMessage("Hi", createMockUsage(100, 50));
+		const messages: AgentMessage[] = [
+			createUserMessage("unread history"),
+			usageMessage,
+			createUserMessage("continue"),
+			createAssistantMessage("Partial thinking", createMockUsage(0, 0)),
+		];
+		let yielded = 0;
+		const newestFirst = function* () {
+			for (let index = messages.length - 1; index >= 0; index--) {
+				yielded++;
+				yield messages[index];
+			}
+		};
+
+		const estimate = estimateContextTokensReverse(newestFirst(), messages.length);
+
+		expect(estimate).toMatchObject(estimateContextTokens(messages));
+		expect(estimate.lastUsageMessage).toBe(usageMessage);
+		expect(yielded).toBe(3);
+	});
+
+	it("estimates every message in a newest-first stream when no valid usage exists", () => {
+		const messages: AgentMessage[] = [
+			createUserMessage("first"),
+			createAssistantMessage("Partial thinking", createMockUsage(0, 0)),
+			createUserMessage("last"),
+		];
+
+		const estimate = estimateContextTokensReverse(messages.slice().reverse(), messages.length);
+
+		expect(estimate).toMatchObject(estimateContextTokens(messages));
+		expect(estimate.lastUsageMessage).toBeNull();
 	});
 });
 

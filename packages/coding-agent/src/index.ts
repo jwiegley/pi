@@ -17,6 +17,8 @@ export {
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	type ForkMessageChoice,
+	type ForkMessagePage,
 	type ModelCycleResult,
 	type ParsedSkillBlock,
 	type PromptOptions,
@@ -277,6 +279,17 @@ export {
 	createWriteTool,
 	type PromptTemplate,
 } from "./core/sdk.ts";
+export type {
+	EntryMetadata,
+	EntryPageOptions,
+	IterateEntriesOptions,
+	RecentActiveEntriesOptions,
+	SessionEntryPage,
+	SessionHistoryMetrics,
+	SessionHistorySummary,
+	SessionSourceIdentity,
+	SessionSourceSnapshot,
+} from "./core/session-history-store.ts";
 export {
 	type BranchSummaryEntry,
 	buildContextEntries,
@@ -286,6 +299,7 @@ export {
 	type ContextEditableContent,
 	type ContextEditEntry,
 	CURRENT_SESSION_VERSION,
+	type CursorPageOptions,
 	type CustomEntry,
 	type CustomMessageEntry,
 	type FileEntry,
@@ -305,6 +319,9 @@ export {
 	type SessionMessageEntry,
 	type SessionProjection,
 	type SessionTreeNode,
+	type SessionTreePage,
+	type SessionTreePageEntry,
+	type SessionTreePageOptions,
 	sessionEntryToContextMessages,
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
@@ -429,6 +446,7 @@ export {
 	type RpcEventListener,
 	type RpcExtensionUIRequest,
 	type RpcExtensionUIResponse,
+	type RpcPageOptions,
 	type RpcResponse,
 	type RpcSessionState,
 	runPrintMode,

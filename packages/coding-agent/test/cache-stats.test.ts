@@ -86,6 +86,15 @@ describe("computeCacheWaste", () => {
 		expect(totals.missedCost).toBeCloseTo(0.36225, 5);
 	});
 
+	it("uses cache-warming refreshes consistently in streamed totals and transcript notices", () => {
+		const missMessage = assistant({ cacheWrite: 110_000, cost: { cacheWrite: 0.4125 }, timestamp: 600_000 });
+		const entries = [entry(turn1), entry(turn2), usageEntry("cache_warm", 500_000), entry(missMessage)];
+		const totals = computeCacheWaste(entries, models);
+		const miss = collectCacheMisses(entries, models).get(missMessage)!;
+		expect(totals).toEqual({ missedTokens: 100_000, missedCost: miss.missedCost, missCount: 1 });
+		expect(miss.idleMs).toBe(100_000);
+	});
+
 	it("counts nothing for healthy sessions", () => {
 		const totals = computeCacheWaste([entry(turn1), entry(turn2)], models);
 		expect(totals.missedTokens).toBe(0);
