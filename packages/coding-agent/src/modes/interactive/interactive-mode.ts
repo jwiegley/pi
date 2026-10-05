@@ -118,7 +118,6 @@ import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
-import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { createUsageCostBreakdownAccumulator } from "../../core/usage-totals.ts";
@@ -2226,9 +2225,7 @@ export class InteractiveMode {
 	 * whatever this returns, so they never reach into the tool registry themselves.
 	 */
 	private getRegisteredToolDefinition(toolName: string) {
-		return this.session.extensionRunner.resolveToolRenderers(toolName, () =>
-			withBuiltInRenderers(toolName, this.session.getToolDefinition(toolName)),
-		);
+		return this.session.getToolRenderers(toolName);
 	}
 
 	private getMarkdownTransformers(): MarkdownTransformer[] {

@@ -183,6 +183,28 @@ A tool that orchestrates other tools can adjust what the model sees while it is 
 
 A tool that reaches other tools declares which ones a call may reach with `reachesTools(input)`: `"all"`, or the words of the input that may name them, where a word refers to every tool or namespace whose name it contains. `codemode` returns `"all"` for scripts that search or list tools and the words of the script otherwise; `tool_search` always returns `"all"`. Extensions that register tools late use it from their `tool_call` handler to finish registering the tools a call needs before it runs, as the MCP extension does for servers that are still connecting. The MCP extension also activates `codemode` or `tool_search` for MCP tools only when the tool of that name declares `reachesTools`.
 
+### Tool renderer wrappers
+
+`pi.registerToolRendererWrapper(wrapper)` wraps the effective `renderShell`, `renderCall`, and `renderResult` slots for every tool. Wrappers run in extension load order and receive the output of earlier wrappers. A custom tool that replaces a built-in tool inherits any renderer slots it omits before wrappers run. In the interactive transcript and HTML exports, resolvers choose renderers first, then wrappers apply once, including for unregistered tools. An unregistered tool's wrapper label defaults to its name.
+
+Fork extensions using the former `registerToolRenderer((tool, renderers) => ...)` wrapper API must rename that call to `registerToolRendererWrapper`. `registerToolRenderer` now accepts the upstream `(toolName, next)` resolver API; the two callback contracts are separate.
+
+The returned object may change renderer slots only. Tool execution, parameters, descriptions, prompt metadata, and active state remain unchanged. A throwing wrapper or invalid return is reported as an extension error; later wrappers still run.
+
+```typescript
+pi.registerToolRendererWrapper((tool, renderers) => {
+  if (tool.name !== "bash" || !renderers.renderResult) return renderers;
+
+  const renderResult = renderers.renderResult;
+  return {
+    ...renderers,
+    renderResult(result, options, theme, context) {
+      return renderResult(result, options, theme, context);
+    },
+  };
+});
+```
+
 ### Activate tools dynamically
 
 Register every tool first, keep optional tools inactive, and use `pi.setActiveTools()` from a loader tool to select the desired active tools. Names must already be registered; unknown names are ignored.

@@ -109,6 +109,7 @@ import {
 	type ToolExposure,
 	type ToolInfo,
 	type ToolLoadout,
+	type ToolRenderers,
 	type TreePreparation,
 	type TurnStartEvent,
 	wrapRegisteredTools,
@@ -148,6 +149,7 @@ import {
 } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
+import { withBuiltInRenderers } from "./tools/renderers/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { combineUsage } from "./usage-totals.ts";
 import {
@@ -497,6 +499,7 @@ export class AgentSession {
 	/** Declared tools whose declarations requests leave out, from `prepareLoadout` hooks. */
 	private _hiddenDeclarations: ReadonlySet<string> = new Set();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
+	private _toolRendererBases: Map<string, ToolDefinition> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
@@ -1530,6 +1533,18 @@ export class AgentSession {
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._toolDefinitions.get(name)?.definition;
+	}
+
+	/** Resolve first, then wrap once, including calls to tools not registered in this session. */
+	getToolRenderers(name: string): ToolRenderers | undefined {
+		const definition = this._toolRendererBases.get(name);
+		const resolved = this._extensionRunner.resolveToolRenderers(name, () => withBuiltInRenderers(name, definition));
+		const { renderShell, renderCall, renderResult } = this._extensionRunner.applyToolRenderers({
+			name,
+			label: definition?.label ?? name,
+			...resolved,
+		});
+		return renderShell || renderCall || renderResult ? { renderShell, renderCall, renderResult } : undefined;
 	}
 
 	/**
@@ -3655,30 +3670,41 @@ export class AgentSession {
 		const previousActiveToolNames = this.getActiveToolNames();
 		const allowedTools = this._allowedTools;
 
-		const registeredTools = this._extensionRunner.getAllRegisteredTools();
-		const allCustomTools = [
+		const runner = this._extensionRunner;
+		const registeredTools = runner.getAllRegisteredTools();
+		const customTools = [
 			...registeredTools,
 			...this._customTools.map((definition) => ({
 				definition,
 				sourceInfo: createSyntheticSourceInfo(`<sdk:${definition.name}>`, { source: "sdk" }),
 			})),
 		].filter((tool) => this._isAllowedTool(tool.definition.name));
-		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
-			Array.from(this._baseToolDefinitions.entries())
-				.filter(([name]) => this._isAllowedTool(name))
-				.map(([name, definition]) => [
-					name,
-					{
-						definition,
-						sourceInfo: createSyntheticSourceInfo(`${BUILTIN_PATH_PREFIX}${name}`, { source: "builtin" }),
-					},
-				]),
-		);
-		for (const tool of allCustomTools) {
-			definitionRegistry.set(tool.definition.name, {
-				definition: tool.definition,
-				sourceInfo: tool.sourceInfo,
+		// Resolver fallbacks must not contain wrappers: resolvers may replace individual slots.
+		this._toolRendererBases = new Map([...this._baseToolDefinitions].filter(([name]) => this._isAllowedTool(name)));
+		for (const { definition } of customTools) {
+			const inherited = this._baseToolDefinitions.get(definition.name);
+			this._toolRendererBases.set(definition.name, {
+				...definition,
+				renderShell: definition.renderShell ?? inherited?.renderShell,
+				renderCall: definition.renderCall ?? inherited?.renderCall,
+				renderResult: definition.renderResult ?? inherited?.renderResult,
 			});
+		}
+		const renderedCustomTools = customTools.map((tool) => ({
+			...tool,
+			definition: runner.applyToolRenderers(tool.definition, this._baseToolDefinitions.get(tool.definition.name)),
+		}));
+		const renderedBuiltInTools = Array.from(this._baseToolDefinitions.entries())
+			.filter(([name]) => this._isAllowedTool(name))
+			.map(([name, definition]) => ({
+				definition: runner.applyToolRenderers(definition),
+				sourceInfo: createSyntheticSourceInfo(`${BUILTIN_PATH_PREFIX}${name}`, { source: "builtin" }),
+			}));
+		const definitionRegistry = new Map<string, ToolDefinitionEntry>(
+			renderedBuiltInTools.map((tool) => [tool.definition.name, tool]),
+		);
+		for (const tool of renderedCustomTools) {
+			definitionRegistry.set(tool.definition.name, tool);
 		}
 		this._toolDefinitions = definitionRegistry;
 		this._toolPromptSnippets = new Map(
@@ -3697,19 +3723,8 @@ export class AgentSession {
 				})
 				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
 		);
-		const runner = this._extensionRunner;
-		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
-		const wrappedBuiltInTools = wrapRegisteredTools(
-			Array.from(this._baseToolDefinitions.values())
-				.filter((definition) => this._isAllowedTool(definition.name))
-				.map((definition) => ({
-					definition,
-					sourceInfo: createSyntheticSourceInfo(`${BUILTIN_PATH_PREFIX}${definition.name}`, {
-						source: "builtin",
-					}),
-				})),
-			runner,
-		);
+		const wrappedExtensionTools = wrapRegisteredTools(renderedCustomTools, runner);
+		const wrappedBuiltInTools = wrapRegisteredTools(renderedBuiltInTools, runner);
 
 		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
@@ -4457,8 +4472,7 @@ export class AgentSession {
 
 		// Create tool renderer if we have an extension runner (for custom tool HTML rendering)
 		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({
-			getToolRenderers: (name) =>
-				this._extensionRunner.resolveToolRenderers(name, () => this.getToolDefinition(name)),
+			getToolRenderers: (name) => this.getToolRenderers(name),
 			theme,
 			cwd: this.sessionManager.getCwd(),
 		});
