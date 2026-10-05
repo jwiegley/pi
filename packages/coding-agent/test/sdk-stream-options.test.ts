@@ -9,7 +9,7 @@ import {
 	normalizeContext,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
@@ -197,6 +197,41 @@ describe("createAgentSession stream options", () => {
 			fixture.session.agent.state.messages = fixture.session.agent.state.messages.slice(1);
 			expect(fixture.session.cacheWarmingStatus?.reason).toBe("conversation context changed");
 		} finally {
+			fixture.dispose();
+		}
+	});
+
+	it.each(["off", "idle"] as const)("keeps actual prompt history deferred with cache warming %s", async (mode) => {
+		const fixture = await createCacheWarmingSession();
+		const { session } = fixture;
+		session.settingsManager.setCacheWarmingMode(mode);
+		session.settingsManager.setCompactionEnabled(false);
+		const prefix = [{ role: "user" as const, content: "previous", timestamp: 1 }];
+		let materializations = 0;
+		session.agent.setMessageSource({
+			length: prefix.length,
+			materialize: () => {
+				materializations++;
+				return prefix.map((message) => ({ ...message }));
+			},
+			last: (role) => (role === undefined || role === "user" ? prefix[0] : undefined),
+			iterateReverse: () => prefix.values(),
+		});
+		const liveRead = vi.spyOn(session.agent.state, "messages", "get").mockImplementation(() => {
+			throw new Error("prompt must not adopt the live transcript");
+		});
+		try {
+			await session.prompt("next");
+			expect(fixture.providerCalls()).toBe(1);
+			expect(session.lastMessage).toMatchObject({ role: "assistant", stopReason: "stop" });
+			expect(materializations).toBe(1);
+			expect(session.cacheWarmingStatus?.state).toBe(mode === "off" ? "inactive" : "scheduled");
+			expect(materializations).toBe(1);
+			session.getMessagesSnapshot();
+			expect(materializations).toBe(2);
+			expect(liveRead).not.toHaveBeenCalled();
+		} finally {
+			liveRead.mockRestore();
 			fixture.dispose();
 		}
 	});

@@ -37,7 +37,11 @@ import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
 import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
-import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
+import {
+	type AgentSessionRuntime,
+	type CreateAgentSessionRuntimeFactory,
+	createAgentSessionRuntime,
+} from "./core/agent-session-runtime.ts";
 import {
 	type AgentSessionRuntimeDiagnostic,
 	createAgentSessionFromServices,
@@ -751,6 +755,7 @@ export async function main(args: string[], options?: MainOptions) {
 				formatMissingSessionCwdPrompt(missingSessionCwdIssue),
 				getMissingSessionCwdOptions(missingSessionCwdIssue),
 			);
+			sessionManager.close();
 			switch (choice) {
 				case "continue":
 					sessionManager = SessionManager.open(sessionFile, sessionDir, cwd);
@@ -880,7 +885,7 @@ export async function main(args: string[], options?: MainOptions) {
 		} = buildSessionOptions(
 			parsed,
 			scopedModels,
-			sessionManager.buildSessionContext().messages.length > 0,
+			sessionManager.buildSessionContextSource().messages.length > 0,
 			modelRuntime,
 			settingsManager,
 		);
@@ -921,11 +926,17 @@ export async function main(args: string[], options?: MainOptions) {
 		};
 	};
 	time("createRuntime");
-	const runtime = await createAgentSessionRuntime(createRuntime, {
-		cwd: sessionManager.getCwd(),
-		agentDir,
-		sessionManager,
-	});
+	let runtime: AgentSessionRuntime;
+	try {
+		runtime = await createAgentSessionRuntime(createRuntime, {
+			cwd: sessionManager.getCwd(),
+			agentDir,
+			sessionManager,
+		});
+	} catch (error) {
+		sessionManager.close();
+		throw error;
+	}
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRuntime, resourceLoader } = services;
