@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,6 +36,24 @@ describe.skipIf(process.platform === "win32")("experimental internal process lau
 
 		await expect.poll(() => canConnect(controlPath), { timeout: 10_000 }).toBe(true);
 		expect(child.pid).not.toBe(process.pid);
+	});
+
+	test("publishes control readiness only after restricting the public socket", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "pi-ip-ready-"));
+		directories.add(directory);
+		const publicPath = join(directory, "p.sock");
+		const controlPath = join(directory, "c.sock");
+		const child = spawnInternalProcess("coordinator", [publicPath, controlPath], {
+			entryUrl: new URL("fixtures/blocked-coordinator-permissions.ts", import.meta.url),
+		});
+		children.add(child);
+
+		await expect.poll(() => existsSync(`${publicPath}.blocked`), { timeout: 10_000 }).toBe(true);
+		expect(await canConnect(controlPath)).toBe(false);
+
+		await writeFile(`${publicPath}.release`, "");
+		await expect.poll(() => canConnect(controlPath), { timeout: 10_000 }).toBe(true);
+		expect((await lstat(publicPath)).mode & 0o777).toBe(0o600);
 	});
 
 	test("waits for a failed activation child to terminate", async () => {
