@@ -3058,7 +3058,6 @@ export class InteractiveMode {
 				// Remove this overlay, not the topmost one: another overlay may have opened above it.
 				if (isOverlay) overlayHandle?.hide();
 				else restoreEditor();
-				// Note: both branches above already call requestRender
 				resolve(result);
 				try {
 					component?.dispose?.();
@@ -3069,7 +3068,10 @@ export class InteractiveMode {
 
 			Promise.resolve(factory(this.ui, theme, this.keybindings, close))
 				.then((c) => {
-					if (closed) return;
+					if (closed) {
+						c.dispose?.();
+						return;
+					}
 					component = c;
 					if (isOverlay) {
 						// Resolve overlay options - can be static or dynamic function
