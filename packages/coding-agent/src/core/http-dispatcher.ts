@@ -78,25 +78,49 @@ function createUndiciOriginDispatcher(origin: string | URL, options: object): un
 	);
 }
 
+function createHttpDispatcher(timeoutMs: number): undici.Dispatcher {
+	return withUndiciErrorListener(
+		new undici.EnvHttpProxyAgent({
+			allowH2: false,
+			// Keep HTTP origins on CONNECT tunnels as they were before Undici 8.7.
+			proxyTunnel: true,
+			bodyTimeout: timeoutMs,
+			connect: {
+				autoSelectFamilyAttemptTimeout: DEFAULT_AUTO_SELECT_FAMILY_ATTEMPT_TIMEOUT_MS,
+			},
+			headersTimeout: timeoutMs,
+			clientFactory: createUndiciClient,
+			factory: createUndiciOriginDispatcher,
+		}),
+	);
+}
+
+export function createHttpIdleTimeoutFetch(timeoutMs: number): typeof globalThis.fetch {
+	const normalizedTimeoutMs = parseHttpIdleTimeoutMs(timeoutMs);
+	if (normalizedTimeoutMs === undefined) {
+		throw new Error(`Invalid HTTP idle timeout: ${String(timeoutMs)}`);
+	}
+	return (async (input, init) => {
+		const dispatcher = createHttpDispatcher(normalizedTimeoutMs);
+		try {
+			return (await undici.fetch(input as Parameters<typeof undici.fetch>[0], {
+				...(init as Parameters<typeof undici.fetch>[1]),
+				dispatcher,
+			})) as unknown as Response;
+		} finally {
+			// Graceful close waits for an active response body, then releases this
+			// request-owned pool. Callers need not own a dispatcher lifecycle.
+			void dispatcher.close();
+		}
+	}) as typeof globalThis.fetch;
+}
+
 export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TIMEOUT_MS): void {
 	const normalizedTimeoutMs = parseHttpIdleTimeoutMs(timeoutMs);
 	if (normalizedTimeoutMs === undefined) {
 		throw new Error(`Invalid HTTP idle timeout: ${String(timeoutMs)}`);
 	}
-	const dispatcher = withUndiciErrorListener(
-		new undici.EnvHttpProxyAgent({
-			allowH2: false,
-			// Keep HTTP origins on CONNECT tunnels as they were before Undici 8.7.
-			proxyTunnel: true,
-			bodyTimeout: normalizedTimeoutMs,
-			connect: {
-				autoSelectFamilyAttemptTimeout: DEFAULT_AUTO_SELECT_FAMILY_ATTEMPT_TIMEOUT_MS,
-			},
-			headersTimeout: normalizedTimeoutMs,
-			clientFactory: createUndiciClient,
-			factory: createUndiciOriginDispatcher,
-		}),
-	);
+	const dispatcher = createHttpDispatcher(normalizedTimeoutMs);
 	undici.setGlobalDispatcher(dispatcher);
 	// Keep fetch and the dispatcher on the same undici implementation. Node 26.0's
 	// bundled fetch can otherwise consume compressed responses through npm undici's
