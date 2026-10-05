@@ -9,6 +9,7 @@
 import type { WriteStream } from "node:fs";
 import { splitIncompleteAnsiSuffix, stripAnsi } from "../utils/ansi.ts";
 import { createOutputFileStream } from "../utils/output-files.ts";
+import { finished } from "node:stream/promises";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
@@ -69,6 +70,14 @@ export async function executeBashWithOperations(
 		}
 	};
 
+	const closeTempFile = async () => {
+		if (!tempFileStream) return;
+		const stream = tempFileStream;
+		tempFileStream = undefined;
+		stream.end();
+		await finished(stream);
+	};
+
 	const decoder = new TextDecoder();
 	// Unfinished escape sequence at the end of the previous chunk, completed by the next chunk.
 	let pendingAnsi = "";
@@ -122,7 +131,7 @@ export async function executeBashWithOperations(
 	} catch (err) {
 		// An aborted command still returns the output it produced so far
 		if (!options?.signal?.aborted) {
-			tempFileStream?.end();
+			await closeTempFile();
 			throw err;
 		}
 	}
@@ -133,7 +142,7 @@ export async function executeBashWithOperations(
 	if (truncationResult.truncated) {
 		ensureTempFile();
 	}
-	tempFileStream?.end();
+	await closeTempFile();
 	const cancelled = options?.signal?.aborted ?? false;
 
 	return {
