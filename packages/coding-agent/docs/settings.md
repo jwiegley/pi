@@ -13,7 +13,7 @@ This reference lists user-configurable settings, their types, defaults, and purp
 | `defaultThinkingLevel` | `"off" \| "minimal" \| "low" \| "medium" \| "high" \| "xhigh" \| "max"` | `"medium"` | Startup thinking level. |
 | `modelThinkingLevels` | object | None | Per-model startup thinking levels keyed by exact `provider/modelId`. |
 | `thinkingBudgets` | object | Built-in budgets | Token budgets for `minimal`, `low`, `medium`, and `high` thinking levels. |
-| `enabledModels` | `string[]` | All available models | Model patterns used for startup selection and model cycling. Uses the same format as `--models`. |
+| `enabledModels` | `string[]` | All available models | Exact `provider/model` identities selected for startup selection and model cycling. |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. |
 | `showCacheMissNotices` | boolean | `false` | Show notices for significant cache misses, successful cache warming, compaction usage, and provider recovery. |
 | `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"streaming"` | Keep eligible provider prompt caches warm during active runs or, with `"idle"`, between runs. Global setting only. |
@@ -21,6 +21,8 @@ This reference lists user-configurable settings, their types, defaults, and purp
 Cache warming runs only when the model declares a cache lifetime and Pi estimates at least $0.05 in avoided cache-miss cost. Refresh usage counts toward session totals but does not enter model context. `/session` shows the next decision; extensions can override it with `cache_warming_decision`. See [Prompt Cache Lifetimes](models.md#prompt-cache-lifetimes).
 
 See [Choose a Model](models.md) for model selection and thinking controls.
+
+`enabledModels` is an explicit allowlist, for example `["anthropic/claude-sonnet-4-5", "openai-codex/gpt-5.5"]`. Provider globs and fuzzy names are not expanded; models discovered later remain outside the scope until selected with `/scoped-models`. The `--models` CLI option continues to accept patterns for one process.
 
 ## Interaction
 

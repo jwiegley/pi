@@ -10,11 +10,18 @@ import { createHarness, type Harness } from "../harness.ts";
 
 function createInteractiveContext(options: {
 	allModels: Model<Api>[];
-	enabledModelIds: string[];
+	enabledModelIds?: string[];
 	scopedModels?: Array<{ model: Model<Api> }>;
+	scopedModelReferences?: string[];
+	modelScopeConfigured?: boolean;
+	persistedScope?: boolean;
+	modelScopeSource?: "cli" | "settings";
 }) {
 	let selector: ScopedModelsSelectorComponent | undefined;
 	const setScopedModels = vi.fn();
+	const setScopedModelReferences = vi.fn();
+	const setModelScopeSource = vi.fn();
+	const setEnabledModels = vi.fn();
 	const getAvailableSnapshot = vi.fn(() => options.allModels);
 	const context = {
 		session: {
@@ -23,11 +30,19 @@ function createInteractiveContext(options: {
 				getAvailableSnapshot,
 			},
 			scopedModels: options.scopedModels ?? [],
+			scopedModelReferences:
+				options.persistedScope === false ? undefined : (options.scopedModelReferences ?? options.enabledModelIds),
+			modelScopeSource:
+				options.modelScopeSource ??
+				(options.persistedScope === false || options.enabledModelIds === undefined ? undefined : "settings"),
+			hasModelScope: options.modelScopeConfigured ?? true,
 			setScopedModels,
+			setScopedModelReferences,
+			setModelScopeSource,
 		},
 		settingsManager: {
 			getEnabledModels: () => options.enabledModelIds,
-			setEnabledModels: vi.fn(),
+			setEnabledModels,
 		},
 		showStatus: vi.fn(),
 		showSelector: (factory: (done: () => void) => { component: ScopedModelsSelectorComponent }) => {
@@ -36,7 +51,15 @@ function createInteractiveContext(options: {
 		updateAvailableProviderCount: vi.fn(),
 		ui: { requestRender: vi.fn() },
 	};
-	return { context, getAvailableSnapshot, getSelector: () => selector, setScopedModels };
+	return {
+		context,
+		getAvailableSnapshot,
+		getSelector: () => selector,
+		setScopedModels,
+		setScopedModelReferences,
+		setModelScopeSource,
+		setEnabledModels,
+	};
 }
 
 async function showModelsSelector(context: object): Promise<void> {
@@ -120,6 +143,7 @@ describe("issue #6949 unavailable scoped models", () => {
 			allModels: [],
 			enabledModelIds: [],
 			scopedModels: [{ model }],
+			persistedScope: false,
 		});
 
 		await showModelsSelector(context);
@@ -158,5 +182,162 @@ describe("issue #6949 unavailable scoped models", () => {
 				{ model: one, thinkingLevel: undefined },
 			]);
 		});
+	});
+
+	it("treats provider wildcards as unavailable instead of selecting current and future models", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "one", name: "One" },
+				{ id: "two", name: "Two" },
+			],
+		});
+		harnesses.push(harness);
+		const factoryModels = harness.models.map((model) => ({ ...model, provider: "factory" }));
+		const { context, getSelector, setScopedModelReferences } = createInteractiveContext({
+			allModels: factoryModels,
+			enabledModelIds: ["factory/*"],
+			scopedModels: [],
+		});
+
+		await showModelsSelector(context);
+		const selector = getSelector();
+		if (!selector) throw new Error("Expected scoped-model selector to open");
+		await vi.waitFor(() => {
+			const rendered = stripAnsi(selector.render(100).join("\n"));
+			expect(rendered).toContain("factory/* [unavailable]");
+			expect(rendered).toContain("one [factory]");
+			expect(rendered).toContain("two [factory]");
+			expect(rendered).not.toContain("✓");
+			expect(setScopedModelReferences).toHaveBeenLastCalledWith(["factory/*"]);
+		});
+	});
+
+	it("persists enable-all as exact identities so later discoveries remain excluded", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "one", name: "One" },
+				{ id: "two", name: "Two" },
+			],
+		});
+		harnesses.push(harness);
+		const [one, two] = harness.models;
+		const ids = [one, two].map((model) => `${model.provider}/${model.id}`);
+		const { context, getSelector, setEnabledModels, setScopedModels } = createInteractiveContext({
+			allModels: [...harness.models],
+			enabledModelIds: [ids[0]],
+			scopedModels: [{ model: one }],
+		});
+
+		await showModelsSelector(context);
+		const selector = getSelector();
+		if (!selector) throw new Error("Expected scoped-model selector to open");
+		selector.handleInput("\x01");
+		selector.handleInput("\x13");
+		expect(setEnabledModels).toHaveBeenLastCalledWith(ids);
+		expect(setScopedModels).toHaveBeenLastCalledWith([
+			{ model: one, thinkingLevel: undefined },
+			{ model: two, thinkingLevel: undefined },
+		]);
+	});
+
+	it("persists an explicitly empty scope without reopening all models", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "one", name: "One" },
+				{ id: "two", name: "Two" },
+			],
+		});
+		harnesses.push(harness);
+		const one = harness.models[0];
+		const { context, getSelector, setEnabledModels, setScopedModels } = createInteractiveContext({
+			allModels: [...harness.models],
+			enabledModelIds: [`${one.provider}/${one.id}`],
+			scopedModels: [{ model: one }],
+		});
+
+		await showModelsSelector(context);
+		const selector = getSelector();
+		if (!selector) throw new Error("Expected scoped-model selector to open");
+		selector.handleInput("\x18");
+		selector.handleInput("\x13");
+		expect(setEnabledModels).toHaveBeenLastCalledWith([]);
+		expect(setScopedModels).toHaveBeenLastCalledWith([]);
+	});
+
+	it("does not let an empty CLI scope fall back to persisted settings", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "one", name: "One" },
+				{ id: "two", name: "Two" },
+			],
+		});
+		harnesses.push(harness);
+		const persistedId = `${harness.models[0].provider}/${harness.models[0].id}`;
+		const { context, getSelector, setModelScopeSource } = createInteractiveContext({
+			allModels: [...harness.models],
+			enabledModelIds: [persistedId],
+			scopedModels: [],
+			scopedModelReferences: [],
+			modelScopeSource: "cli",
+		});
+
+		await showModelsSelector(context);
+		const selector = getSelector();
+		if (!selector) throw new Error("Expected scoped-model selector to open");
+		await vi.waitFor(() => {
+			const rendered = stripAnsi(selector.render(100).join("\n"));
+			expect(rendered).toContain("one [faux]");
+			expect(rendered).toContain("two [faux]");
+			expect(rendered).not.toContain("✓");
+			expect(setModelScopeSource).toHaveBeenLastCalledWith("cli");
+		});
+	});
+
+	it("freezes an unscoped catalogue to exact identities when saved", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "one", name: "One" },
+				{ id: "two", name: "Two" },
+			],
+		});
+		harnesses.push(harness);
+		const ids = harness.models.map((model) => `${model.provider}/${model.id}`);
+		const { context, getSelector, setEnabledModels, setScopedModels, setScopedModelReferences, setModelScopeSource } =
+			createInteractiveContext({
+				allModels: [...harness.models],
+				enabledModelIds: undefined,
+				scopedModels: [],
+				modelScopeConfigured: false,
+			});
+
+		await showModelsSelector(context);
+		const selector = getSelector();
+		if (!selector) throw new Error("Expected scoped-model selector to open");
+		selector.handleInput("\x13");
+		expect(setEnabledModels).toHaveBeenLastCalledWith(ids);
+		expect(setScopedModels).toHaveBeenLastCalledWith(
+			harness.models.map((model) => ({ model, thinkingLevel: undefined })),
+		);
+		expect(setScopedModelReferences).toHaveBeenLastCalledWith(ids);
+		expect(setModelScopeSource).toHaveBeenLastCalledWith("settings");
+	});
+
+	it("preserves thinking suffixes while opening, refreshing, and saving", async () => {
+		const harness = await createHarness({ models: [{ id: "one", name: "One" }] });
+		harnesses.push(harness);
+		const model = harness.models[0];
+		const reference = `${model.provider}/${model.id}:high`;
+		const { context, getSelector, setEnabledModels, setScopedModelReferences } = createInteractiveContext({
+			allModels: [...harness.models],
+			enabledModelIds: [reference],
+			scopedModels: [{ model }],
+		});
+
+		await showModelsSelector(context);
+		const selector = getSelector();
+		if (!selector) throw new Error("Expected scoped-model selector to open");
+		await vi.waitFor(() => expect(setScopedModelReferences).toHaveBeenLastCalledWith([reference]));
+		selector.handleInput("\x13");
+		expect(setEnabledModels).toHaveBeenLastCalledWith([reference]);
 	});
 });
