@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added shared and exclusive session lease modes plus distinct boundary-queued `follow_up` requests.
+
 ## [1.0.1] - 2026-10-03
 
 ## [1.0.0] - 2026-10-01

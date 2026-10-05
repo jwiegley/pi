@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added authenticated remote session discovery, exclusive ownership, correlated current-session task turns, and distinct steer/follow-up controls.
+- Added SQLite-backed bounded session history with paged navigation, streamed export, atomic migration, and lazy active transcripts.
+- Added provider-scoped request/idle timeouts, model-local default thinking levels, and extension-wide tool renderer wrappers.
+
+### Changed
+
+- Removed automatic startup model-catalog refresh and bundled Pi documentation paths from the default system prompt.
+
+### Fixed
+
+- Fixed deferred footer renders retaining a replaced session after its history store closes.
+- Fixed concurrent first opens misclassifying a partially initialized session lock database as foreign.
+- Fixed persisted model scopes expanding provider globs and admitting newly registered models that were never explicitly selected.
+- Preserved deferred indexed history, context edits, recovery, and task-turn ownership across the v0.87.1 context-boundary update.
+- Fixed context-with-system-only extensions being skipped by the context fast path.
+- Preserved bounded indexed history reads across the v0.99.1 virtual model, codemode store, nested tool call, and footer usage cache updates.
+- Fixed indexed branched sessions forked at a user message deferring their file until the first assistant response.
+- Fixed coordinator startup signaling readiness before its public socket is available, causing intermittent remote session discovery and connection failures.
+
 ## [1.0.1] - 2026-10-03
 
 ### New Features

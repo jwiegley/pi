@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added cross-connection session lease enforcement and separate follow-up dispatch to session runtimes.
+
 ## [1.0.1] - 2026-10-03
 
 ## [1.0.0] - 2026-10-01
