@@ -101,6 +101,7 @@ import {
 	type SessionCompactFailedEvent,
 	type SessionStartEvent,
 	type ShutdownHandler,
+	type TaskTurnHandle,
 	type ToolDefinition,
 	type ToolExecutionEndEvent,
 	type ToolExecutionStartEvent,
@@ -450,7 +451,10 @@ export class AgentSession {
 	private _abortDuringBeforeSettle = false;
 	private _isEmittingAgentSettled = false;
 	private readonly _deferredSettledActions: Array<() => Promise<void>> = [];
-
+	private _taskTurnSequence = 0;
+	private _taskTurnAbortRequested = false;
+	private _activeTaskTurnId?: string;
+	private _taskTurnDispatchId?: string;
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
@@ -1864,7 +1868,7 @@ export class AgentSession {
 	private async _startRun(trigger: BeforeAgentStartTrigger, onStarted?: () => void): Promise<void> {
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
-		let messages: AgentMessage[];
+		let messages: AgentMessage[] | undefined;
 		try {
 			messages = await this._prepareRun(trigger);
 		} catch (error) {
@@ -1873,6 +1877,11 @@ export class AgentSession {
 			this._flushPendingCustomMessages();
 			this._resolveIdleWaitIfIdle();
 			throw error;
+		}
+		if (!messages) {
+			this._isAgentRunActive = false;
+			this._resolveIdleWaitIfIdle();
+			return;
 		}
 		// Messages held while the run was starting go before its starting messages, as they would
 		// have while idle. No run exists yet, so they cannot split a tool call from its result.
@@ -1914,7 +1923,7 @@ export class AgentSession {
 	 * message followed by pending nextTurn messages (consumed here) and handler messages, with a
 	 * system patch first when the prompt changed.
 	 */
-	private async _prepareRun(trigger: BeforeAgentStartTrigger): Promise<AgentMessage[]> {
+	private async _prepareRun(trigger: BeforeAgentStartTrigger): Promise<AgentMessage[] | undefined> {
 		// Check if we need to compact before sending (catches aborted responses).
 		// The starting message is sent below, so do not call agent.continue() here.
 		const lastAssistant = this._findLastAssistantMessage();
@@ -1924,6 +1933,8 @@ export class AgentSession {
 
 		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
 		const result = await this._extensionRunner.emitBeforeAgentStart(trigger, this._baseSystemPromptOptions);
+		// Abort during preflight leaves next-turn messages queued for the following run.
+		if (this._agentRunAbortRequested) return undefined;
 		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
 		// which updates the live loadout instead. An explicit edit wins; otherwise the live
 		// loadout is authoritative, so a setActiveTools() call is not undone here.
@@ -2083,6 +2094,9 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		if (this._activeTaskTurnId && this._taskTurnDispatchId !== this._activeTaskTurnId) {
+			throw new Error(`Current session is exclusively assigned to task turn ${this._activeTaskTurnId}`);
+		}
 		if (this._isEmittingAgentSettled) {
 			this._deferredSettledActions.push(async () => await this.prompt(text, options));
 			return;
@@ -2351,6 +2365,9 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
+		if (this._activeTaskTurnId) {
+			throw new Error(`Current session is exclusively assigned to task turn ${this._activeTaskTurnId}`);
+		}
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
@@ -2449,6 +2466,85 @@ export class AgentSession {
 			images,
 			source: "extension",
 		});
+	}
+
+	startTaskTurn(
+		content: string | (TextContent | ImageContent)[],
+		options?: { expandPromptTemplates?: boolean },
+	): TaskTurnHandle {
+		if (!this.isIdle || this._activeTaskTurnId || this._deferredSettledActions.length > 0) {
+			throw new Error("Current session already has an active task turn or queued work");
+		}
+		const id = `task-turn-${++this._taskTurnSequence}`;
+		const messages: AgentMessage[] = [];
+		const unsubscribe = this.subscribe((event) => {
+			if (event.type === "message_end") messages.push(event.message);
+		});
+		this._activeTaskTurnId = id;
+		this._taskTurnAbortRequested = false;
+		const assertActive = () => {
+			if (this._activeTaskTurnId !== id) throw new Error(`Task turn ${id} is no longer active`);
+		};
+		const dispatch = () => {
+			this._taskTurnDispatchId = id;
+			try {
+				return this.sendUserMessage(content, { expandPromptTemplates: options?.expandPromptTemplates ?? false });
+			} finally {
+				this._taskTurnDispatchId = undefined;
+			}
+		};
+		let cancelPending: (() => void) | undefined;
+		const running = this._isEmittingAgentSettled
+			? new Promise<void>((resolve, reject) => {
+					const action = () => {
+						cancelPending = undefined;
+						return dispatch().then(resolve, reject);
+					};
+					cancelPending = () => {
+						const index = this._deferredSettledActions.indexOf(action);
+						if (index >= 0) this._deferredSettledActions.splice(index, 1);
+						cancelPending = undefined;
+						resolve();
+					};
+					this._deferredSettledActions.push(action);
+				})
+			: dispatch();
+		const completed = running
+			.then(() => ({ id, messages }))
+			.finally(() => {
+				unsubscribe();
+				if (this._activeTaskTurnId === id) {
+					this._activeTaskTurnId = undefined;
+					this._taskTurnAbortRequested = false;
+				}
+			});
+		return {
+			id,
+			completed,
+			steer: async (text) => {
+				assertActive();
+				await this.steer(text);
+			},
+			followUp: async (text) => {
+				assertActive();
+				await this.followUp(text);
+			},
+			abort: async () => {
+				assertActive();
+				this._taskTurnAbortRequested = true;
+				if (cancelPending) {
+					cancelPending();
+					await completed;
+					return;
+				}
+				if (this._isAgentRunActive && !this.agent.state.isStreaming) {
+					this._agentRunAbortRequested = true;
+					this.agent.abort();
+					return;
+				}
+				await this.abort();
+			},
+		};
 	}
 
 	/**
@@ -3462,6 +3558,7 @@ export class AgentSession {
 						});
 					});
 				},
+				startTaskTurn: (content, options) => this.startTaskTurn(content, options),
 				appendEntry: (customType, data) => {
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
 					const entry = this.sessionManager.getEntry(entryId);
