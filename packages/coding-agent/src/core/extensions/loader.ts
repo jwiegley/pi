@@ -34,6 +34,7 @@ import type {
 	RegisteredCommand,
 	ToolDefinition,
 	ToolRendererResolver,
+	ToolRendererWrapper,
 } from "./types.ts";
 
 const require = createRequire(import.meta.url);
@@ -304,6 +305,18 @@ function createExtensionAPI(
 			runtime.refreshTools();
 		},
 
+		registerToolRendererWrapper(wrapper: ToolRendererWrapper): void {
+			assertActive();
+			if (typeof wrapper !== "function") throw new TypeError("registerToolRendererWrapper expects a function");
+			extension.toolRendererWrappers.push(wrapper);
+			runtime.refreshTools();
+		},
+		registerToolRenderer(resolver: ToolRendererResolver): void {
+			assertActive();
+			extension.toolRenderers ??= [];
+			extension.toolRenderers.push(resolver);
+		},
+
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
 			assertActive();
 			if (typeof name !== "string" || name.length === 0) {
@@ -366,12 +379,6 @@ function createExtensionAPI(
 			assertActive();
 			extension.entryRenderers ??= new Map();
 			extension.entryRenderers.set(customType, renderer as EntryRenderer);
-		},
-
-		registerToolRenderer(resolver: ToolRendererResolver): void {
-			assertActive();
-			extension.toolRenderers ??= [];
-			extension.toolRenderers.push(resolver);
 		},
 
 		// Flag access - checks extension registered it, reads from runtime
@@ -611,6 +618,8 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		sourceInfo: createSyntheticSourceInfo(extensionPath, { source, baseDir }),
 		handlers: new Map(),
 		tools: new Map(),
+		toolRendererWrappers: [],
+		toolRenderers: [],
 		messageRenderers: new Map(),
 		entryRenderers: new Map(),
 		commands: new Map(),
