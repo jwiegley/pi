@@ -67,6 +67,7 @@ import {
 import { getAgentDir } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
+import { createHttpIdleTimeoutFetch } from "./http-dispatcher.ts";
 import { ModelConfig } from "./model-config.ts";
 import { FileModelsStore, InMemoryCodingAgentModelsStore } from "./models-store.ts";
 import {
@@ -519,6 +520,17 @@ export class ModelRuntime implements Models {
 		return [...new Set([...this.extensionProviders.keys(), ...this.nativeExtensionProviders.keys()])];
 	}
 
+	getProviderTransportOptions(providerId: string): Pick<StreamOptions, "fetch" | "timeoutMs"> {
+		const transport = this.config.getProvider(providerId)?.transport;
+		if (!transport) return {};
+		return {
+			...(transport.requestTimeoutMs !== undefined ? { timeoutMs: transport.requestTimeoutMs } : {}),
+			...(transport.idleTimeoutMs !== undefined
+				? { fetch: createHttpIdleTimeoutFetch(transport.idleTimeoutMs) }
+				: {}),
+		};
+	}
+
 	getRegisteredNativeProvider(providerId: string): Provider | undefined {
 		return this.nativeExtensionProviders.get(providerId);
 	}
@@ -667,7 +679,10 @@ export class ModelRuntime implements Models {
 		});
 		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
 
-		const { transformHeaders, ...rawProviderOptions } = options ?? {};
+		const { transformHeaders, ...rawProviderOptions } = {
+			...this.getProviderTransportOptions(model.provider),
+			...options,
+		};
 		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 		let headers = mergeHeaders(resolution.auth.headers, providerOptions.headers);
 		if (transformHeaders) headers = await transformHeaders(headers ?? {});

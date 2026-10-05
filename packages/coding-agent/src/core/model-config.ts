@@ -122,6 +122,11 @@ const OpenAIResponsesCompatSchema = Type.Object({
 	supportsMaxOutputTokens: Type.Optional(Type.Boolean()),
 });
 
+const ProviderTransportSchema = Type.Object({
+	requestTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 2147483647 })),
+	idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647 })),
+});
+
 const ModelCostRatesSchema = {
 	input: Type.Number(),
 	output: Type.Number(),
@@ -235,6 +240,7 @@ const ProviderConfigSchema = Type.Object({
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
 	authHeader: Type.Optional(Type.Boolean()),
+	transport: Type.Optional(ProviderTransportSchema),
 	models: Type.Optional(Type.Array(ModelDefinitionSchema)),
 	modelOverrides: Type.Optional(Type.Record(Type.String(), ModelOverrideSchema)),
 });
