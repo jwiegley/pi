@@ -1,11 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { SessionInfo } from "../src/core/session-manager.ts";
-import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
+import { deleteSessionFile, SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 type Deferred<T> = {
@@ -45,7 +45,9 @@ function makeSession(overrides: Partial<SessionInfo> & { id: string }): SessionI
 		modified: overrides.modified ?? new Date(0),
 		messageCount: overrides.messageCount ?? 1,
 		firstMessage: overrides.firstMessage ?? "hello",
+		firstMessageTruncated: overrides.firstMessageTruncated ?? false,
 		allMessagesText: overrides.allMessagesText ?? "hello",
+		allMessagesTextTruncated: overrides.allMessagesTextTruncated ?? false,
 	};
 }
 
@@ -127,6 +129,19 @@ describe("session selector path/delete interactions", () => {
 		list.handleInput(CTRL_BACKSPACE);
 
 		expect(confirmationChanges).toEqual([]);
+	});
+
+	it("deletes the disposable sidecar with its session", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-session-delete-"));
+		tempDirs.push(root);
+		const sessionPath = join(root, "session.jsonl");
+		const indexPath = `${sessionPath}.index.sqlite`;
+		writeFileSync(sessionPath, "session\n");
+		writeFileSync(indexPath, "index\n");
+
+		await expect(deleteSessionFile(sessionPath)).resolves.toMatchObject({ ok: true });
+		expect(existsSync(sessionPath)).toBe(false);
+		expect(existsSync(indexPath)).toBe(false);
 	});
 
 	it("enters confirmation mode on Ctrl+D even with a non-empty search query", async () => {

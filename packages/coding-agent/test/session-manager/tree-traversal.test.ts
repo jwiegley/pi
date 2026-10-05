@@ -318,6 +318,31 @@ describe("SessionManager append and tree traversal", () => {
 			const branchedEntry = entries.find((e) => e.id === id3)!;
 			expect(branchedEntry.parentId).toBe(id1); // sibling of id2
 		});
+
+		it("keeps append ordinals on the selected branch", async () => {
+			const session = SessionManager.inMemory();
+			const id1 = session.appendMessage(userMsg("root"));
+			const id2 = session.appendMessage(assistantMsg("trunk"));
+			const abandonedId = session.appendMessage(userMsg("abandoned"));
+			session.branch(id2);
+			const leafId = session.appendMessage(userMsg("selected"));
+
+			expect(session.getActiveBranchMetadata().map(({ id, ordinal }) => ({ id, ordinal }))).toEqual([
+				{ id: id1, ordinal: 0 },
+				{ id: id2, ordinal: 1 },
+				{ id: leafId, ordinal: 3 },
+			]);
+			expect(session.getEntryMetadata(abandonedId)?.ordinal).toBe(2);
+			const newestFirst: Array<{ id: string; ordinal: number }> = [];
+			await session.iterateActiveAncestry(({ id, ordinal }) => {
+				newestFirst.push({ id, ordinal });
+			});
+			expect(newestFirst).toEqual([
+				{ id: leafId, ordinal: 3 },
+				{ id: id2, ordinal: 1 },
+				{ id: id1, ordinal: 0 },
+			]);
+		});
 	});
 
 	describe("branchWithSummary", () => {

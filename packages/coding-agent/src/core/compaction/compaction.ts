@@ -30,6 +30,7 @@ import {
 	type CompactionEntry,
 	type ProjectedSessionEntry,
 	type SessionEntry,
+	type SessionManager,
 	type SessionProjection,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
@@ -181,6 +182,10 @@ export interface ContextUsageEstimate {
 	lastUsageIndex: number | null;
 }
 
+export interface ReverseContextUsageEstimate extends ContextUsageEstimate {
+	lastUsageMessage: AssistantMessage | null;
+}
+
 function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const usage = getAssistantUsage(messages[i]);
@@ -223,10 +228,45 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 	};
 }
 
+/**
+ * Estimate context tokens from a newest-first stream. Stops once the latest
+ * valid assistant usage is found, so deferred history remains unmaterialized.
+ */
+export function estimateContextTokensReverse(
+	messages: Iterable<AgentMessage>,
+	messageCount: number,
+): ReverseContextUsageEstimate {
+	let trailingTokens = 0;
+	let visited = 0;
+	for (const message of messages) {
+		visited++;
+		const usage = getAssistantUsage(message);
+		if (usage) {
+			const usageTokens = calculateContextTokens(usage);
+			return {
+				tokens: usageTokens + trailingTokens,
+				usageTokens,
+				trailingTokens,
+				lastUsageIndex: messageCount - visited,
+				lastUsageMessage: message as AssistantMessage,
+			};
+		}
+		trailingTokens += estimateTokens(message);
+	}
+
+	return {
+		tokens: trailingTokens,
+		usageTokens: 0,
+		trailingTokens,
+		lastUsageIndex: null,
+		lastUsageMessage: null,
+	};
+}
+
 /** Estimate projected context without trusting usage captured before a later edit or compaction. */
 export function estimateProjectedContextTokens(
 	projection: SessionProjection,
-	branchEntries: SessionEntry[],
+	branchEntries: readonly { id: string; type: string }[],
 ): ContextUsageEstimate {
 	const estimate = estimateContextTokens(projection.messages);
 	if (estimate.lastUsageIndex !== null) {
@@ -870,14 +910,15 @@ function findProjectedCutPoint(
 }
 
 export function prepareCompaction(
-	pathEntries: SessionEntry[],
+	path: SessionEntry[] | SessionManager,
 	settings: CompactionSettings,
 ): CompactionPreparation | undefined {
+	const pathEntries = Array.isArray(path) ? path : path.getActiveBranchMetadata();
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
 
-	const projection = buildSessionProjection(pathEntries);
+	const projection = Array.isArray(path) ? buildSessionProjection(path) : path.buildSessionProjection();
 	const projectedEntries = projection.entries;
 	const sourceEntries = projectedEntries.map((entry) => entry.sourceEntry);
 	// The newest compaction is projected first. Older compaction entries can still

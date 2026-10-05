@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
@@ -10,6 +10,7 @@ import {
 	createAgentSessionServices,
 } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import type {
@@ -19,6 +20,8 @@ import type {
 	SessionShutdownEvent,
 	SessionStartEvent,
 } from "../src/index.ts";
+import { FooterComponent } from "../src/modes/interactive/components/footer.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -109,7 +112,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			}
 		});
 
-		return { runtimeHost, faux };
+		return { runtimeHost, faux, tempDir };
 	}
 
 	it("emits session_before_switch and session_start for new and resume flows", async () => {
@@ -204,6 +207,47 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		);
 		runtimeHost.setBeforeSessionInvalidate(undefined);
 		runtimeHost.setRebindSession(undefined);
+	});
+
+	it("detaches deferred footer renders across every persisted replacement", async () => {
+		initTheme(undefined, false);
+		const { runtimeHost, tempDir } = await createRuntimeHost(() => {});
+		await runtimeHost.session.prompt("seed");
+		const originalSessionFile = runtimeHost.session.sessionFile!;
+		const forkEntryId = runtimeHost.session.getUserMessagesForForking()[0]!.entryId;
+		const importPath = join(tempDir, "external-import.jsonl");
+		copyFileSync(originalSessionFile, importPath);
+
+		const footerData = {
+			getGitBranch: () => null,
+			getExtensionStatuses: () => new Map<string, string>(),
+			getAvailableProviderCount: () => 1,
+			onBranchChange: () => () => {},
+		} as ReadonlyFooterDataProvider;
+		const footer = new FooterComponent(runtimeHost.session, footerData);
+		let deferredRender: Promise<string[]> | undefined;
+
+		runtimeHost.setBeforeSessionInvalidate(() => {
+			footer.detachSession();
+			deferredRender = Promise.resolve().then(() => footer.render(80));
+		});
+		runtimeHost.setRebindSession(async (session) => {
+			footer.bindSession(session);
+		});
+
+		const expectSafeReplacement = async (replace: () => Promise<unknown>): Promise<void> => {
+			deferredRender = undefined;
+			await replace();
+			const render = deferredRender;
+			expect(render).toBeDefined();
+			await expect(render!).resolves.toEqual([]);
+			expect(footer.render(80).length).toBeGreaterThan(0);
+		};
+
+		await expectSafeReplacement(() => runtimeHost.newSession());
+		await expectSafeReplacement(() => runtimeHost.switchSession(originalSessionFile));
+		await expectSafeReplacement(() => runtimeHost.fork(forkEntryId, { position: "at" }));
+		await expectSafeReplacement(() => runtimeHost.importFromJsonl(importPath));
 	});
 
 	it("emits session_before_fork and session_start and honors cancellation", async () => {
