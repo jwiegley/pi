@@ -13,6 +13,9 @@ import {
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 	getAgentDir,
+	getDocsPath,
+	getExamplesPath,
+	getReadmePath,
 	type InlineExtension,
 	ModelRuntime,
 	readStoredCredential,
@@ -491,6 +494,28 @@ export function resolveDocumentationVariant(
 	throw new TypeError('PI_EVAL_VARIANT must be "without_docs" or "with_docs".');
 }
 
+export function includePiDocumentation(defaultPrompt: string): string {
+	if (defaultPrompt.includes("<docs>")) throw new Error("Pi system prompt already has a documentation section.");
+	const cwdMarker = "\n<cwd>\n";
+	const cwdStart = defaultPrompt.indexOf(cwdMarker);
+	if (
+		cwdStart === -1 ||
+		cwdStart !== defaultPrompt.lastIndexOf(cwdMarker) ||
+		defaultPrompt.indexOf("\n</cwd>", cwdStart + cwdMarker.length) === -1
+	) {
+		throw new Error("Default Pi system prompt has no unique complete working-directory section.");
+	}
+	const documentation = `\n<docs>\nPi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
+- Main documentation: ${getReadmePath()}
+- Additional docs: ${getDocsPath()}
+- Examples: ${getExamplesPath()} (extensions, custom tools, SDK)
+- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
+- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
+- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
+- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)\n</docs>`;
+	return defaultPrompt.slice(0, cwdStart) + documentation + defaultPrompt.slice(cwdStart);
+}
+
 export function excludePiDocumentation(defaultPrompt: string): string {
 	const documentationStartMarker = "\n<docs>\n";
 	const documentationEndMarker = "\n</docs>";
@@ -531,7 +556,7 @@ export function createPiDocumentationEvalHarness<TOutput extends JsonValue>(
 		...options,
 		name: variant,
 		tools: options.tools ?? [...DOCUMENTATION_EVAL_TOOLS],
-		...(variant === "without_docs" ? { transformSystemPrompt: excludePiDocumentation } : {}),
+		...(variant === "with_docs" ? { transformSystemPrompt: includePiDocumentation } : {}),
 		expectedPiDocumentation: variant === "with_docs",
 	});
 }
