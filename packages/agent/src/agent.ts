@@ -1,11 +1,12 @@
 import {
 	createInitialSystemMessage,
 	getCurrentSystemMessage,
-	getCurrentSystemPrompt,
+	getSystemMessageText,
 	type ImageContent,
 	type Message,
 	type Model,
 	type SimpleStreamOptions,
+	type SystemMessage,
 	type TextContent,
 	type ThinkingBudgets,
 	type Transport,
@@ -78,16 +79,155 @@ type MutableAgentState = Omit<AgentState, "isStreaming" | "streamingMessage" | "
 export type AgentInitialState = Partial<
 	Omit<AgentState, "pendingToolCalls" | "isStreaming" | "streamingMessage" | "errorMessage">
 >;
+/** Deferred backing for a stable conversation-prefix snapshot. */
+export interface AgentMessageSource {
+	/** Fixed prefix length; all methods must describe this same snapshot. */
+	readonly length: number;
+	/** Return a detached, ordinary mutable array. */
+	materialize(): AgentMessage[];
+	/** Return the final matching message without materializing the transcript. */
+	last(role?: AgentMessage["role"]): AgentMessage | undefined;
+	/** Iterate messages newest-first without materializing the transcript. */
+	iterateReverse(): Iterable<AgentMessage>;
+}
 
-function createMutableAgentState(initialState?: AgentInitialState): MutableAgentState {
+class AgentMessageBacking {
+	private source?: AgentMessageSource;
+	// Share the non-owning identity across adoption; the source may die while its messages remain live.
+	private sourceReference?: WeakRef<AgentMessageSource>;
+	private materializedMessages?: WeakRef<AgentMessage>[];
+	private tail: AgentMessage[] = [];
+	private adopted: AgentMessage[];
+
+	constructor(messages: AgentMessage[] = []) {
+		this.adopted = messages.slice();
+	}
+
+	get messages(): AgentMessage[] {
+		if (this.source) {
+			const messages = this.source.materialize();
+			this.materializedMessages = messages.map((message) => new WeakRef(message));
+			this.adopted = [...messages, ...this.tail];
+			this.source = undefined;
+			this.tail = [];
+		}
+		return this.adopted;
+	}
+
+	set messages(messages: AgentMessage[]) {
+		if (
+			!this.materializedMessages?.every(
+				(ref, index) => messages[index] !== undefined && messages[index] === ref.deref(),
+			)
+		) {
+			this.sourceReference = undefined;
+			this.materializedMessages = undefined;
+		}
+		this.source = undefined;
+		this.tail = [];
+		this.adopted = messages.slice();
+	}
+
+	setSource(source: AgentMessageSource): void {
+		if (this.sourceReference?.deref() !== source) this.sourceReference = new WeakRef(source);
+		this.materializedMessages = undefined;
+		this.source = source;
+		this.tail = [];
+		this.adopted = [];
+	}
+
+	get length(): number {
+		return this.source ? this.source.length + this.tail.length : this.adopted.length;
+	}
+
+	findLast(query?: AgentMessage["role"] | ((message: AgentMessage) => boolean)): AgentMessage | undefined {
+		const messages = this.source ? this.tail : this.adopted;
+		if (query === undefined) {
+			return messages[messages.length - 1] ?? this.source?.last();
+		}
+		if (typeof query === "function") {
+			for (const message of this.iterateReverse()) {
+				if (query(message)) return message;
+			}
+			return undefined;
+		}
+		for (let index = messages.length - 1; index >= 0; index--) {
+			if (messages[index]?.role === query) return messages[index];
+		}
+		return this.source?.last(query);
+	}
+
+	*iterateReverse(): IterableIterator<AgentMessage> {
+		const messages = this.source ? this.tail : this.adopted;
+		for (let index = messages.length - 1; index >= 0; index--) {
+			yield messages[index];
+		}
+		if (this.source) yield* this.source.iterateReverse();
+	}
+
+	append(message: AgentMessage): void {
+		if (this.source) this.tail.push(message);
+		else this.adopted.push(message);
+	}
+
+	pop(): AgentMessage | undefined {
+		if (!this.source) return this.adopted.pop();
+		if (this.tail.length > 0) return this.tail.pop();
+		return this.messages.pop();
+	}
+
+	captureMessagePrefix(): () => boolean {
+		const source = this.source ? this.sourceReference : undefined;
+		const sourceLength = this.source?.length ?? 0;
+		const tail = (this.source ? this.tail : this.adopted).map((message) => new WeakRef(message));
+		const length = sourceLength + tail.length;
+		return () => {
+			if (length === 0) return true;
+			if (this.length < length) return false;
+			if (this.source && this.source !== source?.deref()) return false;
+			if (
+				!this.source &&
+				source &&
+				(this.sourceReference !== source ||
+					!this.materializedMessages?.every(
+						(ref, index) => this.adopted[index] !== undefined && this.adopted[index] === ref.deref(),
+					))
+			)
+				return false;
+			const messages = this.source ? this.tail : this.adopted;
+			const offset = this.source ? 0 : sourceLength;
+			return tail.every(
+				(ref, index) => messages[offset + index] !== undefined && messages[offset + index] === ref.deref(),
+			);
+		};
+	}
+
+	currentSystemMessage(): SystemMessage | undefined {
+		const messages: SystemMessage[] = [];
+		for (const message of this.iterateReverse()) {
+			if (message.role === "system") messages.push(message);
+		}
+		return getCurrentSystemMessage(messages.reverse());
+	}
+
+	snapshot(): AgentMessage[] {
+		return this.source ? [...this.source.materialize(), ...this.tail] : this.adopted.slice();
+	}
+}
+
+function createMutableAgentState(
+	initialState?: AgentInitialState,
+	messageBacking = new AgentMessageBacking(initialState?.messages),
+): MutableAgentState {
 	let tools = initialState?.tools?.slice() ?? [];
-	let messages = initialState?.messages?.slice() ?? [];
+	const messages = messageBacking.messages;
 	const initialMessage = createInitialSystemMessage(initialState?.systemPrompt, tools.map(toToolDeclaration));
 	if (messages[0]?.role !== "system" && initialMessage) messages.unshift(initialMessage);
 
 	return {
 		get systemPrompt() {
-			return getCurrentSystemPrompt(messages);
+			const message = messageBacking.currentSystemMessage();
+			return message ? getSystemMessageText(message) : "";
 		},
 		model: initialState?.model ?? DEFAULT_MODEL,
 		thinkingLevel: initialState?.thinkingLevel ?? "off",
@@ -98,10 +238,10 @@ function createMutableAgentState(initialState?: AgentInitialState): MutableAgent
 			tools = nextTools.slice();
 		},
 		get messages() {
-			return messages;
+			return messageBacking.messages;
 		},
 		set messages(nextMessages: AgentMessage[]) {
-			messages = nextMessages.slice();
+			messageBacking.messages = nextMessages;
 		},
 		isStreaming: false,
 		streamingMessage: undefined,
@@ -187,6 +327,7 @@ type ActiveRun = {
  */
 export class Agent {
 	private _state: MutableAgentState;
+	private readonly messageBacking: AgentMessageBacking;
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
 	private readonly steeringQueue: PendingMessageQueue;
 	private readonly followUpQueue: PendingMessageQueue;
@@ -230,7 +371,8 @@ export class Agent {
 	constructor(options: AgentOptions) {
 		// Older compiled consumers may omit options or streamFn even though the current API requires them.
 		const runtimeOptions: Partial<AgentOptions> = options ?? {};
-		this._state = createMutableAgentState(runtimeOptions.initialState);
+		this.messageBacking = new AgentMessageBacking(runtimeOptions.initialState?.messages);
+		this._state = createMutableAgentState(runtimeOptions.initialState, this.messageBacking);
 		this.convertToLlm = runtimeOptions.convertToLlm ?? defaultConvertToLlm;
 		this.transformContext = runtimeOptions.transformContext;
 		this.streamFunction = runtimeOptions.streamFn ?? getDefaultStreamFn();
@@ -275,6 +417,60 @@ export class Agent {
 	 */
 	get state(): AgentState {
 		return this._state;
+	}
+
+	/** Replace the transcript with a deferred message source. */
+	setMessageSource(source: AgentMessageSource): void {
+		this.messageBacking.setSource(source);
+	}
+
+	/** Number of stored messages without materializing a deferred source. */
+	get messageCount(): number {
+		return this.messageBacking.length;
+	}
+
+	/** Final stored message without materializing a source that implements last(). */
+	get lastMessage(): AgentMessage | undefined {
+		return this.findLastMessage();
+	}
+
+	/** Final stored message, optionally filtered, without materializing a deferred source. */
+	findLastMessage(): AgentMessage | undefined;
+	findLastMessage(role: AgentMessage["role"]): AgentMessage | undefined;
+	findLastMessage<T extends AgentMessage>(predicate: (message: AgentMessage) => message is T): T | undefined;
+	findLastMessage(predicate: (message: AgentMessage) => boolean): AgentMessage | undefined;
+	findLastMessage(query?: AgentMessage["role"] | ((message: AgentMessage) => boolean)): AgentMessage | undefined {
+		return this.messageBacking.findLast(query);
+	}
+
+	/** Iterate stored messages newest-first without materializing a deferred source. */
+	iterateMessagesReverse(): Iterable<AgentMessage> {
+		return this.messageBacking.iterateReverse();
+	}
+
+	/** Append a message while keeping any deferred prefix deferred. */
+	appendMessage(message: AgentMessage): void {
+		this.messageBacking.append(message);
+	}
+
+	/** Remove and return the final message. A deferred prefix is materialized only when it must be modified. */
+	popMessage(): AgentMessage | undefined {
+		return this.messageBacking.pop();
+	}
+
+	/** Check whether the current transcript still extends this prefix without materializing a deferred source. */
+	captureMessagePrefix(): () => boolean {
+		return this.messageBacking.captureMessagePrefix();
+	}
+
+	/** Replay prompt and tool state without adopting deferred conversation payloads. */
+	getCurrentSystemMessage(): SystemMessage | undefined {
+		return this.messageBacking.currentSystemMessage();
+	}
+
+	/** Return a detached real array without adopting it as the public live transcript. */
+	getMessagesSnapshot(): AgentMessage[] {
+		return this.messageBacking.snapshot();
 	}
 
 	/** Controls how queued steering messages are drained. */
@@ -357,8 +553,8 @@ export class Agent {
 			throw new Error("Agent is already processing. Wait for completion before resetting.");
 		}
 
-		const baseline = getCurrentSystemMessage(this._state.messages);
-		this._state.messages = baseline ? [baseline] : [];
+		const baseline = this.messageBacking.currentSystemMessage();
+		this.messageBacking.messages = baseline ? [baseline] : [];
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
@@ -386,8 +582,8 @@ export class Agent {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
 		}
 
-		const lastMessage = this._state.messages[this._state.messages.length - 1];
-		if (!lastMessage || this._state.messages.every((message) => message.role === "system")) {
+		const lastMessage = this.lastMessage;
+		if (!lastMessage || !this.findLastMessage((message) => message.role !== "system")) {
 			throw new Error("No messages to continue from");
 		}
 
@@ -459,7 +655,7 @@ export class Agent {
 
 	private createContextSnapshot(): AgentContext {
 		return {
-			messages: this._state.messages.slice(),
+			messages: this.getMessagesSnapshot(),
 			tools: this._state.tools.slice(),
 		};
 	}
@@ -574,7 +770,7 @@ export class Agent {
 
 			case "message_end":
 				this._state.streamingMessage = undefined;
-				this._state.messages.push(event.message);
+				this.appendMessage(event.message);
 				break;
 
 			case "tool_execution_start": {
