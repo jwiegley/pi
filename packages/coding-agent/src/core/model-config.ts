@@ -44,6 +44,10 @@ const ModelFieldDescriptions = {
 	contextWindow: "Context window in tokens.",
 	maxTokens: "Maximum output tokens.",
 } as const;
+const ProviderTransportSchema = Type.Object({
+	requestTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 2147483647 })),
+	idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647 })),
+});
 
 const ModelDefinitionSchema = Type.Object({
 	id: Type.String({ minLength: 1, description: "Model ID sent to the API." }),
@@ -110,6 +114,7 @@ const ProviderConfigSchema = Type.Object({
 	authHeader: Type.Optional(
 		Type.Boolean({ default: false, description: "Whether to send the resolved API key as Authorization: Bearer." }),
 	),
+	transport: Type.Optional(ProviderTransportSchema),
 	models: Type.Optional(Type.Array(ModelDefinitionSchema)),
 	modelOverrides: Type.Optional(Type.Record(Type.String(), ModelOverrideSchema)),
 });
