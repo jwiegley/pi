@@ -49,6 +49,7 @@ Use a single file for a small extension and a directory for a multi-file impleme
 
 Reload replaces the extension runtime, so code after `await ctx.reload()` must not reuse state from the old runtime. Only personal and explicit command-line extensions can participate in the `project_trust` event that runs before project extensions load.
 
+
 <a id="understand-the-lifecycle"></a>
 
 ## Respect the runtime lifecycle
@@ -233,6 +234,8 @@ Choose storage based on how state participates in the conversation:
 Reconstruct branch-sensitive state from `ctx.sessionManager.getBranch()` during `session_start`.
 Do not rebuild it from every file entry because abandoned branches represent alternative histories.
 Register an entry or message renderer when custom stored content should appear in the transcript.
+
+For session history, use `ctx.sessionManager.getEntriesPage()`, `getTreePage()`, targeted lookups, or iterators. `getEntries()` and `getTree()` are deprecated compatibility APIs that materialize complete history.
 
 <a id="custom-ui"></a>
 <a id="mode-behavior"></a>

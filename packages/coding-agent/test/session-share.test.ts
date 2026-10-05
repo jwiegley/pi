@@ -50,6 +50,8 @@ describe("shareSession", () => {
 				sessionManager: {
 					getSessionId: () => name,
 					getCwd: () => "/tmp",
+					getSessionFile: () => undefined,
+					iterateBranchEntries() {},
 					getBranch: () => [],
 				},
 				state: { systemPrompt: name, tools: [] },

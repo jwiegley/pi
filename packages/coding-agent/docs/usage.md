@@ -77,7 +77,7 @@ Use `!!` when you want to run a command without sending its output to the model.
 
 ## Copy, export, or share results
 
-Press `Ctrl+X` or run `/copy` to copy the last assistant response. Use `/export` to save the session as HTML or JSONL.
+Press `Ctrl+X` or run `/copy` to copy the last assistant response. Use `/export` to save the session as HTML or JSONL. HTML export publishes atomically and refuses to replace an existing path; choose a new filename or remove the old export first.
 
 Use `/share` to upload the session and get a viewer link. With Radius authentication, the artifact is visible to your Radius organization. Otherwise, Pi creates a private GitHub gist through the GitHub CLI. Review the session first because it can contain prompts, tool output, file contents, and credentials exposed during the conversation.
 

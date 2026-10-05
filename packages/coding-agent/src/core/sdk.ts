@@ -191,16 +191,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	// Check if session has existing data to restore
-	const existingSession = sessionManager.buildSessionContext();
+	const existingSession = sessionManager.buildSessionContextSource();
 	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
+	const hasThinkingEntry = sessionManager.hasThinkingLevelChange();
 
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
 
 	// Assistant messages name the physical model that answered, so a virtual selection is only in
 	// model_change entries.
-	const sessionModel = getBranchSelection(sessionManager.getBranch(), (provider, modelId) =>
+	const sessionModel = getBranchSelection(sessionManager, (provider, modelId) =>
 		modelRuntime.getModel(provider, modelId),
 	);
 
@@ -343,16 +343,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Warm only requests for the selected model. Requests a virtual selection routed, or that an
 	// extension redirected, may not be repeated by the next request, so warming them could be wasted.
 	const cacheContextIsCurrent = (requestModel: Model<any>) => {
-		const messages = agent.state.messages;
+		const hasPrefix = agent.captureMessagePrefix();
 		return () => {
 			const currentModel = agent.state.model;
-			const currentMessages = agent.state.messages;
-			return (
-				currentModel.provider === requestModel.provider &&
-				currentModel.id === requestModel.id &&
-				messages.length <= currentMessages.length &&
-				messages.every((message, index) => currentMessages[index] === message)
-			);
+			return currentModel.provider === requestModel.provider && currentModel.id === requestModel.id && hasPrefix();
 		};
 	};
 	const transformProviderPayload = async (payload: unknown) => {
@@ -390,7 +384,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			model,
 			thinkingLevel,
 			tools: [],
-			messages: existingSession.messages,
+			messages: [],
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
@@ -423,6 +417,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Restore missing settings metadata for older sessions.
 	if (hasExistingSession) {
+		agent.setMessageSource(existingSession.messages);
 		if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
 		}

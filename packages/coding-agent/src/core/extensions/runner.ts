@@ -1296,6 +1296,8 @@ export class ExtensionRunner {
 	 * handlers then see the full transcript and their output is used as returned.
 	 */
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
+		if (!this.hasHandlers("context") && !this.hasHandlers("context_with_system")) return messages;
+
 		const ctx = this.createContext();
 		let currentMessages = structuredClone(messages);
 
