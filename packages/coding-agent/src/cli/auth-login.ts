@@ -229,7 +229,9 @@ async function refreshProviderCatalog(
 ) {
 	// The login is saved by now, so Ctrl+C only skips the refresh.
 	const cancelled = () => {
-		terminal.write(`Skipped the ${provider.name} model catalog refresh; ${APP_NAME} refreshes it on next start.`);
+		terminal.write(
+			`Skipped the ${provider.name} model catalog refresh; open /model or run \`${APP_NAME} update --models\` to refresh it.`,
+		);
 	};
 	try {
 		const result = await modelRuntime.refresh({
@@ -240,11 +242,11 @@ async function refreshProviderCatalog(
 			cancelled();
 		} else if (result.aborted) {
 			terminal.write(
-				`The ${provider.name} model catalog refresh timed out; ${APP_NAME} refreshes it on next start.`,
+				`The ${provider.name} model catalog refresh timed out; open /model or run \`${APP_NAME} update --models\` to refresh it.`,
 			);
 		} else if (result.errors.size > 0) {
 			terminal.write(
-				`The ${provider.name} model catalog could not be refreshed; ${APP_NAME} retries on next start.`,
+				`The ${provider.name} model catalog could not be refreshed; open /model or run \`${APP_NAME} update --models\` to retry.`,
 			);
 		}
 	} catch (error: unknown) {

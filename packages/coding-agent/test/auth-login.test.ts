@@ -421,7 +421,9 @@ describe("pi auth login", () => {
 		);
 		const terminal = scriptedTerminal(["sk-test"]);
 		expect(await run([PROVIDER_ID], modelRuntime, terminal, controller.signal)).toBe(0);
-		expect(terminal.lines).toContain("Skipped the Login Test model catalog refresh; pi refreshes it on next start.");
+		expect(terminal.lines).toContain(
+			"Skipped the Login Test model catalog refresh; open /model or run `pi update --models` to refresh it.",
+		);
 		expect(await credentials.read(PROVIDER_ID)).toMatchObject({ type: "api_key", key: "sk-test" });
 	});
 
