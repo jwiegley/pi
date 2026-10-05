@@ -18,10 +18,7 @@ describe("MCP tool renderers", () => {
 		initTheme("dark");
 		const harness = await createHarness({ extensionFactories: [mcpExtension] });
 		try {
-			const resolve = (toolName: string) =>
-				harness.session.extensionRunner.resolveToolRenderers(toolName, () =>
-					harness.session.getToolDefinition(toolName),
-				);
+			const resolve = (toolName: string) => harness.session.getToolRenderers(toolName);
 
 			const call = resolve("mcp__my_docs__search")?.renderCall?.({ query: "pi" }, theme, {
 				expanded: false,

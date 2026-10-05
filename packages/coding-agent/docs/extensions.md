@@ -2133,6 +2133,28 @@ pi.registerToolRenderer((toolName, next) => {
 });
 ```
 
+### pi.registerToolRendererWrapper(wrapper)
+
+`pi.registerToolRendererWrapper(wrapper)` wraps the effective `renderShell`, `renderCall`, and `renderResult` slots for every tool. Wrappers run in extension load order and receive the output of earlier wrappers. A custom tool that replaces a built-in tool inherits any renderer slots it omits before wrappers run. In the interactive transcript and HTML exports, resolvers choose renderers first, then wrappers apply once, including for unregistered tools. An unregistered tool's wrapper label defaults to its name.
+
+Fork extensions using the former `registerToolRenderer((tool, renderers) => ...)` wrapper API must rename that call to `registerToolRendererWrapper`. `registerToolRenderer` now accepts the upstream `(toolName, next)` resolver API; the two callback contracts are separate.
+
+The returned object may change renderer slots only. Tool execution, parameters, descriptions, prompt metadata, and active state remain unchanged. A throwing wrapper or invalid return is reported as an extension error; later wrappers still run.
+
+```typescript
+pi.registerToolRendererWrapper((tool, renderers) => {
+  if (tool.name !== "bash" || !renderers.renderResult) return renderers;
+
+  const renderResult = renderers.renderResult;
+  return {
+    ...renderers,
+    renderResult(result, options, theme, context) {
+      return renderResult(result, options, theme, context);
+    },
+  };
+});
+```
+
 ### pi.getSettings()
 
 Return a copy of the effective settings, with global and project settings merged and overrides applied.
