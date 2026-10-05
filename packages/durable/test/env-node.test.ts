@@ -78,6 +78,10 @@ async function collectShellOutput(
 	return { result, output };
 }
 
+function resolveBashPath(): string {
+	return execFileSync("bash", ["-c", 'printf "%s" "$BASH"'], { encoding: "utf8" }).trim();
+}
+
 function toBashSingleQuotedArg(value: string): string {
 	return `'${value.replace(/\\/g, "/").replace(/'/g, `'"'"'`)}'`;
 }
@@ -642,7 +646,7 @@ describe("NodeExecutionEnv shell", () => {
 		getOrThrow(
 			await env.writeFile(
 				shellPath,
-				'#!/bin/sh\nprintf \'args:%s\\n\' "$*" >&2\nexec /bin/bash "$@"\n',
+				`#!/bin/sh\nprintf 'args:%s\\n' "$*" >&2\nexec ${toBashSingleQuotedArg(resolveBashPath())} "$@"\n`,
 				BACKGROUND_CONTEXT,
 			),
 		);
@@ -841,7 +845,7 @@ describe("NodeExecutionEnv shell", () => {
 		const root = createTempDir();
 		const pidFile = join(root, "shell.pid");
 		const controller = new AbortController();
-		const env = new NodeExecutionEnv({ cwd: root, shellPath: "/bin/bash" });
+		const env = new NodeExecutionEnv({ cwd: root, shellPath: resolveBashPath() });
 		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 		const previousSystemRoot = process.env.SystemRoot;
 		process.env.SystemRoot = "/definitely/missing/windows";
