@@ -65,6 +65,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private refreshStatusSuccess = false;
 	private tui: TUI;
 	private scopedModels: ReadonlyArray<ScopedModelItem>;
+	private getScopedModels?: () => ReadonlyArray<ScopedModelItem>;
 	private defaultModel?: DefaultModelReference;
 	private scope: ModelScope = "all";
 	private scopeText?: Text;
@@ -83,6 +84,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		initialSearchInput?: string,
 		onSelectAsDefault?: (model: Model<any>) => void,
 		defaultModel?: DefaultModelReference,
+		modelScopeConfigured = scopedModels.length > 0,
+		getScopedModels?: () => ReadonlyArray<ScopedModelItem>,
 	) {
 		super();
 
@@ -90,8 +93,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.currentModel = currentModel;
 		this.modelRuntime = modelRuntime;
 		this.scopedModels = scopedModels;
+		this.getScopedModels = getScopedModels;
 		this.defaultModel = defaultModel;
-		this.scope = scopedModels.length > 0 ? "scoped" : "all";
+		this.scope = modelScopeConfigured ? "scoped" : "all";
 		this.onSelectCallback = onSelect;
 		this.onSelectAsDefaultCallback = onSelectAsDefault;
 		this.onCancelCallback = onCancel;
@@ -101,7 +105,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 
 		// Add hint about model filtering
-		if (scopedModels.length > 0) {
+		if (modelScopeConfigured) {
 			this.scopeText = new Text(this.getScopeText(), 0, 0);
 			this.addChild(this.scopeText);
 			this.scopeHintText = new Text(this.getScopeHintText(), 0, 0);
@@ -165,7 +169,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			model,
 		}));
 		this.allModels = this.sortModels(models);
-		this.scopedModels = this.scopedModels.map((scoped) => {
+		this.scopedModels = (this.getScopedModels?.() ?? this.scopedModels).map((scoped) => {
 			const refreshed = this.modelRuntime.getModel(scoped.model.provider, scoped.model.id);
 			return refreshed ? { ...scoped, model: refreshed } : scoped;
 		});

@@ -327,7 +327,7 @@ export const SettingsSchema = Type.Object(
 		images: Type.Optional(ImageSettingsSchema),
 		enabledModels: Type.Optional(
 			Type.Array(Type.String(), {
-				description: "Model patterns for cycling, in the same format as the --models CLI flag.",
+				description: "Exact provider/model identities selected for cycling.",
 			}),
 		),
 		defaultTools: Type.Optional(
