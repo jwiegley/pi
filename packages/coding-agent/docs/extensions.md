@@ -237,6 +237,8 @@ The built-in MCP support connects registered servers. When nothing does, because
 `ExtensionContext` provides the working directory, mode, UI, session manager, model runtime, abort signal, context usage, and controls for compaction and shutdown.
 Use `ctx.modelRegistry.streamSimple()` for provider-neutral nested model calls.
 
+`ctx.scopedModels` is the read-only intersection of the configured scope and the available catalog. CLI `--models` patterns resolve once into exact identities retained across session replacement. Persisted `enabledModels` contains exact `provider/model` identities re-resolved as catalogs change. An empty list can mean disabled scoping or an explicit scope with no available models. Each entry is `{ model, thinkingLevel? }`.
+
 Command handlers receive `ExtensionCommandContext`, which adds operations for waiting until idle, reloading, tree navigation, and session replacement.
 These operations are command-only because calling them from lifecycle handlers can deadlock the runtime.
 

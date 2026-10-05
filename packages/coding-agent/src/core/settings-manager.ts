@@ -1337,7 +1337,10 @@ export class SettingsManager {
 	}
 
 	getEnabledModels(): string[] | undefined {
-		return this.settings.enabledModels;
+		const models: unknown = this.settings.enabledModels;
+		if (models === undefined) return undefined;
+		if (!Array.isArray(models) || !models.every((model) => typeof model === "string")) return [];
+		return [...models];
 	}
 
 	/** The resolved `defaultTools` selection, or undefined when no settings layer sets it. */
