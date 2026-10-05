@@ -81,9 +81,9 @@ Repetition order alternates by run number to reduce order bias.
 
 ## Documentation variants
 
-`without_docs` omits the coding-agent `README.md`, `CHANGELOG.md`, `docs/`, and `examples/`, then removes the Pi documentation-routing section from the default system prompt.
+`without_docs` omits the coding-agent `README.md`, `CHANGELOG.md`, `docs/`, and `examples/`, and uses the fork's unchanged documentation-free default prompt.
 
-`with_docs` includes those files and uses the unchanged default prompt.
+`with_docs` includes those files and explicitly adds the upstream Pi documentation-routing section to the prompt.
 
 Both variants install the same local workspace tarballs. Existing npm overrides ensure coding-agent's internal Pi dependencies also come from the current repository rather than the registry. Documentation and source files from internal dependency packages are removed symmetrically so they cannot act as alternate instructions. Startup validates the image allowlist and verifies that the installed coding-agent package resolves from `dist/`. Eval definitions, evaluator helpers, fixtures, and Vitest configuration are root-owned and unreadable after the harness permanently drops to an unprivileged UID. Each run receives a new home, agent directory, workspace, session directory, and container filesystem.
 
