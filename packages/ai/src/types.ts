@@ -1116,6 +1116,8 @@ export interface Model<TApi extends Api> extends BaseModel<TApi> {
 	 */
 	type?: "chat";
 	reasoning: boolean;
+	/** Optional model-local safe default used when no user or session thinking preference exists. */
+	defaultThinkingLevel?: "off";
 	/**
 	 * Maps pi thinking levels to provider/model-specific values.
 	 * Missing keys use provider defaults. null marks a level as unsupported.
