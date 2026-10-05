@@ -428,31 +428,62 @@ describe("ExtensionRunner", () => {
 			]);
 		});
 
+		it("loads renderer registrations without leaking them across reloads", async () => {
+			const registeringPath = path.join(extensionsDir, "register-renderer.ts");
+			const emptyPath = path.join(extensionsDir, "empty-renderer.ts");
+			fs.writeFileSync(
+				registeringPath,
+				`export default function(pi) {
+	if (pi.registerToolRendererWrapper.length !== 1) throw new Error("wrong renderer ABI arity");
+	pi.registerToolRendererWrapper((_tool, renderers) => renderers);
+}`,
+			);
+			fs.writeFileSync(emptyPath, "export default function() {}\n");
+
+			const first = await loadExtensions([registeringPath], tempDir);
+			expect(first.errors).toEqual([]);
+			expect(first.extensions[0]?.toolRendererWrappers).toHaveLength(1);
+
+			const second = await loadExtensions([emptyPath], tempDir);
+			expect(second.errors).toEqual([]);
+			expect(second.extensions[0]?.toolRendererWrappers).toEqual([]);
+		});
+
+		it("rejects non-function renderer registrations", async () => {
+			const extensionPath = path.join(extensionsDir, "invalid-renderer.ts");
+			fs.writeFileSync(extensionPath, "export default function(pi) { pi.registerToolRendererWrapper(null); }\n");
+
+			const result = await loadExtensions([extensionPath], tempDir);
+
+			expect(result.extensions).toEqual([]);
+			expect(result.errors[0]?.error).toContain("registerToolRendererWrapper expects a function");
+		});
+
 		it("keeps first tool when two extensions register the same name", async () => {
 			const first = `
-				import { Type } from "typebox";
-				export default function(pi) {
-					pi.registerTool({
-						name: "shared",
-						label: "shared",
-						description: "first",
-						parameters: Type.Object({}),
-						execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
-					});
-				}
-			`;
+			import { Type } from "typebox";
+			export default function(pi) {
+				pi.registerTool({
+					name: "shared",
+					label: "shared",
+					description: "first",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+				});
+			}
+		`;
 			const second = `
-				import { Type } from "typebox";
-				export default function(pi) {
-					pi.registerTool({
-						name: "shared",
-						label: "shared",
-						description: "second",
-						parameters: Type.Object({}),
-						execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
-					});
-				}
-			`;
+			import { Type } from "typebox";
+			export default function(pi) {
+				pi.registerTool({
+					name: "shared",
+					label: "shared",
+					description: "second",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+				});
+			}
+		`;
 			fs.writeFileSync(path.join(extensionsDir, "a-first.ts"), first);
 			fs.writeFileSync(path.join(extensionsDir, "b-second.ts"), second);
 

@@ -171,6 +171,8 @@ export type {
 	SetLabelHandler,
 	SetModelHandler,
 	SetThinkingLevelHandler,
+	// Tools
+	StockToolRenderers,
 	TaskTurnHandle,
 	TaskTurnResult,
 	TerminalInputHandler,
@@ -179,7 +181,6 @@ export type {
 	// Events - Tool
 	ToolCallEvent,
 	ToolCallEventResult,
-	// Tools
 	ToolDefinition,
 	// Events - Tool Execution
 	ToolExecutionEndEvent,
@@ -192,8 +193,10 @@ export type {
 	ToolLoadout,
 	ToolLoadoutChanges,
 	ToolNamespace,
+	ToolRendererInfo,
 	ToolRendererResolver,
 	ToolRenderers,
+	ToolRendererWrapper,
 	ToolRenderResultOptions,
 	ToolResultEvent,
 	ToolResultEventResult,
