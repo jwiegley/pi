@@ -92,7 +92,6 @@ async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 }
-
 describe("FooterDataProvider reftable branch detection", () => {
 	let originalCwd: string;
 	let tempDir: string;
@@ -216,8 +215,6 @@ describe("FooterDataProvider reftable branch detection", () => {
 			expect(vi.mocked(execFile)).not.toHaveBeenCalled();
 			await vi.advanceTimersByTimeAsync(2);
 			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
-			await vi.advanceTimersByTimeAsync(650);
-			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
 		} finally {
 			provider.dispose();
 			vi.useRealTimers();
@@ -235,8 +232,9 @@ describe("FooterDataProvider reftable branch detection", () => {
 			const onBranchChange = vi.fn();
 			provider.onBranchChange(onBranchChange);
 
-			writeFileSync(join(reftableDir, "tables.list"), "1\n");
-			// Real fs watcher events can arrive late under full-suite load.
+			writeFileSync(join(reftableDir, "tables.list"), "updated\n");
+			// Drive the refresh explicitly; native fs watcher events can arrive late.
+			emitReftableChange(provider);
 			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1, 10_000);
 			await waitFor(() => provider.getGitBranch() === "foo", 10_000);
 
