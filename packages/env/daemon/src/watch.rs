@@ -22,6 +22,7 @@ const DEBOUNCE: Duration = Duration::from_millis(50);
 /// macOS: FSEvents streams go live after `watch` returns; a rescan this long after installing watchers catches changes
 /// made in between.
 const FSEVENTS_SETTLE: Duration = Duration::from_millis(500);
+const DARWIN_NATIVE_RESCAN: Duration = Duration::from_secs(1);
 const DEFAULT_POLL_MS: u64 = 2000;
 const DEFAULT_MAX_DIRECTORIES: usize = 10_000;
 /// In polling mode, recently modified small files are also compared by content.
@@ -247,6 +248,16 @@ struct FileWatcher<'a> {
 }
 
 impl FileWatcher<'_> {
+    fn rescan_interval(&self) -> Option<Duration> {
+        match self.mode {
+            Mode::Polling => Some(self.poll_interval),
+            Mode::Native if cfg!(target_os = "macos") => {
+                Some(self.poll_interval.min(DARWIN_NATIVE_RESCAN))
+            }
+            Mode::Native => None,
+        }
+    }
+
     fn send(&self, json: Value) {
         self.output.control(Frame::new(EVENT, self.id, json));
     }
@@ -735,7 +746,7 @@ pub fn run(id: u32, json: &Value, output: &Output, control: &Control) -> Result<
     watcher.sync(false).map_err(|error| error.failure())?;
     watcher.send(json!({ "kind": "ready", "mode": watcher.mode.name() }));
     let mut flush_at: Option<Instant> = None;
-    let mut poll_at = Instant::now() + watcher.poll_interval;
+    let mut poll_at = Instant::now() + watcher.rescan_interval().unwrap_or(watcher.poll_interval);
     loop {
         if watcher.cancelled() {
             return Ok(json!({}));
@@ -745,7 +756,7 @@ pub fn run(id: u32, json: &Value, output: &Output, control: &Control) -> Result<
         for at in [flush_at, watcher.settle_at].into_iter().flatten() {
             wake = wake.min(at);
         }
-        if watcher.mode == Mode::Polling {
+        if watcher.rescan_interval().is_some() {
             wake = wake.min(poll_at);
         }
         match events.recv_timeout(wake.saturating_duration_since(now)) {
@@ -759,7 +770,8 @@ pub fn run(id: u32, json: &Value, output: &Output, control: &Control) -> Result<
         }
         let now = Instant::now();
         let due = |at: Option<Instant>| at.is_some_and(|at| at <= now);
-        let polling_due = watcher.mode == Mode::Polling && poll_at <= now;
+        let rescan_interval = watcher.rescan_interval();
+        let polling_due = rescan_interval.is_some() && poll_at <= now;
         if due(flush_at) || due(watcher.settle_at) || polling_due {
             if due(flush_at) {
                 flush_at = None;
@@ -771,7 +783,7 @@ pub fn run(id: u32, json: &Value, output: &Output, control: &Control) -> Result<
                 return Ok(json!({}));
             }
             if polling_due {
-                poll_at = Instant::now() + watcher.poll_interval;
+                poll_at = Instant::now() + rescan_interval.expect("due rescan has an interval");
             }
         }
     }

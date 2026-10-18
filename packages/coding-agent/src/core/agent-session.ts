@@ -460,7 +460,6 @@ export class AgentSession {
 	private _isEmittingAgentSettled = false;
 	private readonly _deferredSettledActions: Array<() => Promise<void>> = [];
 	private _taskTurnSequence = 0;
-	private _taskTurnAbortRequested = false;
 	private _activeTaskTurnId?: string;
 	private _taskTurnDispatchId?: string;
 	private _resourceLoader: ResourceLoader;
@@ -2029,7 +2028,7 @@ export class AgentSession {
 		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
 		const result = await this._extensionRunner.emitBeforeAgentStart(trigger, this._baseSystemPromptOptions);
 		// Abort during preflight leaves next-turn messages queued for the following run.
-		if (this._agentRunAbortRequested) return undefined;
+		if (this._agentRunAbortRequested && this._activeTaskTurnId) return undefined;
 		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
 		// which updates the live loadout instead. An explicit edit wins; otherwise the live
 		// loadout is authoritative, so a setActiveTools() call is not undone here.
@@ -2574,7 +2573,6 @@ export class AgentSession {
 			if (event.type === "message_end") messages.push(event.message);
 		});
 		this._activeTaskTurnId = id;
-		this._taskTurnAbortRequested = false;
 		const assertActive = () => {
 			if (this._activeTaskTurnId !== id) throw new Error(`Task turn ${id} is no longer active`);
 		};
@@ -2608,7 +2606,6 @@ export class AgentSession {
 				unsubscribe();
 				if (this._activeTaskTurnId === id) {
 					this._activeTaskTurnId = undefined;
-					this._taskTurnAbortRequested = false;
 				}
 			});
 		return {
@@ -2624,7 +2621,6 @@ export class AgentSession {
 			},
 			abort: async () => {
 				assertActive();
-				this._taskTurnAbortRequested = true;
 				if (cancelPending) {
 					cancelPending();
 					await completed;

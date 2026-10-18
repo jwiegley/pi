@@ -59,6 +59,21 @@
               "default": false,
               "description": "Whether to send the resolved API key as Authorization: Bearer."
             },
+            "transport": {
+              "type": "object",
+              "properties": {
+                "requestTimeoutMs": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2147483647
+                },
+                "idleTimeoutMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 2147483647
+                }
+              }
+            },
             "models": {
               "type": "array",
               "items": {
@@ -91,6 +106,10 @@
                     "type": "boolean",
                     "default": false,
                     "description": "Whether the model supports thinking."
+                  },
+                  "defaultThinkingLevel": {
+                    "type": "string",
+                    "const": "off"
                   },
                   "thinkingLevelMap": {
                     "$ref": "#/$defs/ThinkingLevelMap",
@@ -215,6 +234,10 @@
                     "reasoning": {
                       "type": "boolean",
                       "description": "Whether the model supports thinking."
+                    },
+                    "defaultThinkingLevel": {
+                      "type": "string",
+                      "const": "off"
                     },
                     "thinkingLevelMap": {
                       "$ref": "#/$defs/ThinkingLevelMap",
