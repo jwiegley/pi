@@ -44,6 +44,7 @@ function createContext(
 			},
 		},
 		footer: { invalidate: vi.fn() },
+		programStatus: { handleEvent: vi.fn() },
 		ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
 		pendingTools: new Map(),
 		entriesRenderedByBoundaryCompaction: new Set(),
