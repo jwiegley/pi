@@ -890,7 +890,7 @@ describe("Agent", () => {
 		const agent = new Agent({
 			streamFn: (_model, context) => {
 				providerMessages = context.messages;
-				const stream = new MockAssistantStream();
+				const stream = createAssistantMessageEventStream();
 				queueMicrotask(() => {
 					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
 				});

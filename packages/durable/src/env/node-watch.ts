@@ -50,6 +50,7 @@ const DEBOUNCE_MS = 50;
  * catches them.
  */
 const FSEVENTS_SETTLE_MS = 500;
+const DARWIN_NATIVE_RESCAN_MS = 1000;
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_MAX_DIRECTORIES = 10_000;
 /** In polling mode, recently modified small files are also compared by content: a second write within the file system's
@@ -146,6 +147,7 @@ export class NodeFileWatcher implements FileWatcher {
 	#mode: "native" | "polling";
 	#snapshot: Snapshot = new Map();
 	#timer: ReturnType<typeof setTimeout> | undefined;
+	#pollTimer: ReturnType<typeof setTimeout> | undefined;
 	#settleTimer: ReturnType<typeof setTimeout> | undefined;
 	#running: Promise<void> | undefined;
 	#dirty = false;
@@ -210,6 +212,8 @@ export class NodeFileWatcher implements FileWatcher {
 		this.#closed = true;
 		clearTimeout(this.#timer);
 		this.#timer = undefined;
+		clearTimeout(this.#pollTimer);
+		this.#pollTimer = undefined;
 		clearTimeout(this.#settleTimer);
 		this.#settleTimer = undefined;
 		for (const { watcher } of this.#watchers.values()) watcher.close();
@@ -226,11 +230,15 @@ export class NodeFileWatcher implements FileWatcher {
 	}
 
 	#schedulePoll(): void {
-		if (this.#closed || this.#mode !== "polling") return;
-		this.#timer = setTimeout(() => {
-			this.#timer = undefined;
+		if (this.#closed || (this.#mode !== "polling" && process.platform !== "darwin")) return;
+		// FSEvents can omit content changes beneath a watched directory. Native
+		// events stay prompt; this bounded rescan also catches missed changes.
+		const interval =
+			this.#mode === "polling" ? this.#pollIntervalMs : Math.min(this.#pollIntervalMs, DARWIN_NATIVE_RESCAN_MS);
+		this.#pollTimer = setTimeout(() => {
+			this.#pollTimer = undefined;
 			void this.#flush().finally(() => this.#schedulePoll());
-		}, this.#pollIntervalMs);
+		}, interval);
 	}
 
 	#scheduleFlush(): void {
@@ -474,6 +482,8 @@ export class NodeFileWatcher implements FileWatcher {
 		this.#deliver({ overflow: true });
 		clearTimeout(this.#timer);
 		this.#timer = undefined;
+		clearTimeout(this.#pollTimer);
+		this.#pollTimer = undefined;
 		this.#schedulePoll();
 	}
 
