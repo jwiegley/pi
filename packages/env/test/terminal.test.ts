@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { Connection, RemoteError } from "../src/connection.ts";
 import { openTerminal } from "../src/terminal.ts";
@@ -89,14 +89,18 @@ describe.skipIf(process.platform === "win32")("openTerminal", () => {
 		terminal.write("sleep 100\n");
 		// The shell forks before it execs: wait until the foreground job is the command itself, not the forked shell.
 		const named = process.platform === "darwin" || process.platform === "linux";
+		const sleepPath = process.env.PATH?.split(delimiter)
+			.map((dir) => join(dir, "sleep"))
+			.find(existsSync);
+		const sleepNames = new Set(["sleep", ...(sleepPath ? [basename(realpathSync(sleepPath))] : [])]);
 		let foreground = await terminal.foreground();
-		for (let tries = 0; (!foreground || (named && foreground.name !== "sleep")) && tries < 100; tries++) {
+		for (let tries = 0; (!foreground || (named && !sleepNames.has(foreground.name ?? ""))) && tries < 100; tries++) {
 			await new Promise((resolve) => setTimeout(resolve, 20));
 			foreground = await terminal.foreground();
 		}
 		expect(foreground?.pid).toBeGreaterThan(0);
 		expect(foreground?.pid).not.toBe(terminal.pid);
-		if (named) expect(foreground?.name).toBe("sleep");
+		if (named) expect(sleepNames.has(foreground?.name ?? "")).toBe(true);
 		terminal.close();
 		await expect(terminal.exited).rejects.toMatchObject({ code: "aborted" });
 		await expect(terminal.foreground()).rejects.toMatchObject({ code: "EBADF" });
