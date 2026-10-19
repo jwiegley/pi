@@ -1,3 +1,4 @@
+import { lookup } from "node:dns/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
@@ -93,6 +94,13 @@ function startCatalogServer(requests: string[]): Promise<Server> {
 	});
 }
 
+// runtime.refresh() also requests the live OpenRouter API (/api/v1/models/user). Resolve its host at module
+// level (async, runs before tests) and skip where it does not resolve, as in network-less Nix build sandboxes.
+const openRouterResolves = await lookup("openrouter.ai").then(
+	() => true,
+	() => false,
+);
+
 describe("model catalog protocol with the current client", () => {
 	const requests: string[] = [];
 	let server: Server;
@@ -107,7 +115,7 @@ describe("model catalog protocol with the current client", () => {
 		await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 	});
 
-	it("negotiates the catalog for its version and reaches the OpenRouter API", async () => {
+	it.skipIf(!openRouterResolves)("negotiates the catalog for its version and reaches the OpenRouter API", async () => {
 		allowNetwork();
 		const runtime = await ModelRuntime.create({
 			credentials: new InMemoryCredentialStore(),
