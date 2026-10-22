@@ -6,6 +6,10 @@
 
 - Added optional model-local default thinking levels for provider-specific defaults.
 
+### Fixed
+
+- Fixed every later OpenAI Responses request failing once history held a tool call whose name Responses rejects (outside `^[a-zA-Z0-9_-]{1,128}$`), such as a shell command a model returned where the tool name belongs; replay now sends a stable `invalid_tool_name_<hash>`, and call IDs and valid names are unchanged ([#10139](https://github.com/earendil-works/pi/issues/10139))
+
 ## [1.3.0] - 2026-10-15
 
 ### Breaking Changes

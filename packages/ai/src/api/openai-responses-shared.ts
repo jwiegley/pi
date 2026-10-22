@@ -153,6 +153,19 @@ export interface ConvertResponsesToolsOptions {
 // Message conversion
 // =============================================================================
 
+// Responses accepts a function_call name only when it matches this pattern.
+const RESPONSES_FUNCTION_NAME = /^[a-zA-Z0-9_-]{1,128}$/;
+
+/**
+ * Keep a replayed call's name when Responses accepts it. A model can return a
+ * call whose name is not a tool name at all (GLM has put a whole shell command
+ * there). Pi answered that call "not found", but replaying the name verbatim
+ * makes every later request fail. The call_id still pairs it with that result.
+ */
+function replayedFunctionName(name: string): string {
+	return RESPONSES_FUNCTION_NAME.test(name) ? name : `invalid_tool_name_${shortHash(name)}`;
+}
+
 export function convertResponsesMessages<TApi extends Api>(
 	model: Model<TApi>,
 	context: TranscriptContext,
@@ -337,7 +350,7 @@ export function convertResponsesMessages<TApi extends Api>(
 							type: "function_call",
 							id: itemId,
 							call_id: callId,
-							name: toolCall.name,
+							name: replayedFunctionName(toolCall.name),
 							arguments: JSON.stringify(toolCall.arguments),
 							...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
 						});
