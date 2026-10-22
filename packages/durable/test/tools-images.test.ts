@@ -310,6 +310,7 @@ describe("read of images, with the Photon image processor", () => {
 		expect(onlyImage(await read("a.gif", gif(), { images: processor })).mimeType).toBe("image/gif");
 	});
 
+	// Multiple full-image encodes can exceed Vitest's 5s default on shared CI runners.
 	it("scales an image down to the maximum size, and says how to map coordinates back", async () => {
 		const result = await read("wide.png", encode(4000, 1000, "png"), { images: processor });
 		const block = onlyImage(result);
@@ -317,7 +318,7 @@ describe("read of images, with the Photon image processor", () => {
 		expect(messages(result)).toEqual([
 			`Read image file [${block.mimeType}]. Resized from 4000x1000 to 2000x500. Multiply coordinates by 2.00 to map them to the original.`,
 		]);
-	});
+	}, 60_000);
 
 	// Multiple full-image encodes can exceed Vitest's 5s default on shared CI runners.
 	it("re-encodes a PNG too large for the byte limit as JPEG at its size, and shrinks it when that is not enough", async () => {
