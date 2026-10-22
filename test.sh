@@ -80,5 +80,9 @@ for name in CI GITHUB_ACTIONS; do
 	[[ -z "$value" ]] || test_env+=("$name=$value")
 done
 
+# A builder that shares its CPUs caps Vitest's worker pool.
+value="${VITEST_MAX_WORKERS-}"
+[[ -z "$value" ]] || test_env+=("VITEST_MAX_WORKERS=$value")
+
 echo "Running tests without API keys in isolated home: $test_root/home"
 env -i "${test_env[@]}" npm test
