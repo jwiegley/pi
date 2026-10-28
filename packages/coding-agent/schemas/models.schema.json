@@ -65,14 +65,17 @@
                 "requestTimeoutMs": {
                   "type": "integer",
                   "minimum": 1,
-                  "maximum": 2147483647
+                  "maximum": 2147483647,
+                  "description": "Request timeout in milliseconds. Takes precedence over retry.provider.timeoutMs and httpIdleTimeoutMs, but not over a per-call timeout."
                 },
                 "idleTimeoutMs": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 2147483647
+                  "maximum": 2147483647,
+                  "description": "HTTP idle timeout in milliseconds; 0 disables it. Applies only where the API adapter uses Pi's fetch: Bedrock and WebSocket transports ignore it, and the Google Generative AI and Vertex adapters reject requests that set it."
                 }
-              }
+              },
+              "description": "Timeouts for this provider's requests only."
             },
             "models": {
               "type": "array",
@@ -109,7 +112,8 @@
                   },
                   "defaultThinkingLevel": {
                     "type": "string",
-                    "const": "off"
+                    "const": "off",
+                    "description": "Thinking level to start with when no explicit, session, per-model, or global level applies, including after a switch from a model without thinking. Only \"off\" is accepted."
                   },
                   "thinkingLevelMap": {
                     "$ref": "#/$defs/ThinkingLevelMap",
@@ -237,7 +241,8 @@
                     },
                     "defaultThinkingLevel": {
                       "type": "string",
-                      "const": "off"
+                      "const": "off",
+                      "description": "Thinking level to start with when no explicit, session, per-model, or global level applies, including after a switch from a model without thinking. Only \"off\" is accepted."
                     },
                     "thinkingLevelMap": {
                       "$ref": "#/$defs/ThinkingLevelMap",
