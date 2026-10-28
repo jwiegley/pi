@@ -1,6 +1,6 @@
-import { type ClientIdentity, PI_ATTRIBUTION } from "@earendil-works/pi-ai";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { type ClientIdentity, PI_ATTRIBUTION } from "@earendil-works/pi-ai";
 import {
 	type AssistantMessage,
 	createAssistantMessageEventStream,

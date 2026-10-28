@@ -45,10 +45,30 @@ const ModelFieldDescriptions = {
 	contextWindow: "Context window in tokens.",
 	maxTokens: "Maximum output tokens.",
 } as const;
-const ProviderTransportSchema = Type.Object({
-	requestTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 2147483647 })),
-	idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 2147483647 })),
-});
+const ProviderTransportSchema = Type.Object(
+	{
+		requestTimeoutMs: Type.Optional(
+			Type.Integer({
+				minimum: 1,
+				maximum: 2147483647,
+				description:
+					"Request timeout in milliseconds. Takes precedence over retry.provider.timeoutMs and httpIdleTimeoutMs, but not over a per-call timeout.",
+			}),
+		),
+		idleTimeoutMs: Type.Optional(
+			Type.Integer({
+				minimum: 0,
+				maximum: 2147483647,
+				description:
+					"HTTP idle timeout in milliseconds; 0 disables it. Applies only where the API adapter uses Pi's fetch: Bedrock and WebSocket transports ignore it, and the Google Generative AI and Vertex adapters reject requests that set it.",
+			}),
+		),
+	},
+	{ description: "Timeouts for this provider's requests only." },
+);
+/** Describes defaultThinkingLevel in models entries and modelOverrides entries. */
+const DefaultThinkingLevelDescription =
+	'Thinking level to start with when no explicit, session, per-model, or global level applies, including after a switch from a model without thinking. Only "off" is accepted.';
 
 const ModelDefinitionSchema = Type.Object({
 	id: Type.String({ minLength: 1, description: "Model ID sent to the API." }),
@@ -56,7 +76,7 @@ const ModelDefinitionSchema = Type.Object({
 	api: Type.Optional(Type.String({ minLength: 1, description: "Overrides the provider api." })),
 	baseUrl: Type.Optional(Type.String({ minLength: 1, description: "Overrides the provider baseUrl." })),
 	reasoning: Type.Optional(Type.Boolean({ default: false, description: ModelFieldDescriptions.reasoning })),
-	defaultThinkingLevel: Type.Optional(Type.Literal("off")),
+	defaultThinkingLevel: Type.Optional(Type.Literal("off", { description: DefaultThinkingLevelDescription })),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(ModelInputModalitySchema, { default: ["text"] })),
 	inputLimits: Type.Optional(ModelInputLimitsSchema),
@@ -77,7 +97,7 @@ const ModelDefinitionSchema = Type.Object({
 const ModelOverrideSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1, description: ModelFieldDescriptions.name })),
 	reasoning: Type.Optional(Type.Boolean({ description: ModelFieldDescriptions.reasoning })),
-	defaultThinkingLevel: Type.Optional(Type.Literal("off")),
+	defaultThinkingLevel: Type.Optional(Type.Literal("off", { description: DefaultThinkingLevelDescription })),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(ModelInputModalitySchema)),
 	inputLimits: Type.Optional(ModelInputLimitsSchema),

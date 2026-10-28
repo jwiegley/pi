@@ -616,7 +616,7 @@ pi.on("session_shutdown", async (event, ctx) => {
 
 Fired before a run starts, after input handling and expansion. Can inject a message and/or modify the system prompt.
 
-`event.messageType` says what started the run: `"user"` for a prompt or `pi.sendUserMessage()`, with `prompt` and `images`; `"custom"` for `pi.sendMessage(..., { triggerTurn: true })` while idle, with the starting `message` and no `prompt`.
+`event.messageType` says what started the run: `"user"` for a prompt or `pi.sendUserMessage()`, with `prompt` and `images`; `"custom"` for `pi.sendMessage(..., { triggerTurn: true })` while idle, with the starting `message` and an empty `prompt` (`""`), so handlers that read `prompt` without checking `messageType` see no user text.
 
 ```typescript
 pi.on("before_agent_start", async (event, ctx) => {

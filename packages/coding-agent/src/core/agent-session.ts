@@ -1296,15 +1296,21 @@ export class AgentSession {
 		const toolCallIds = new Set(message.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])));
 		// A context edit replaces the projected copy, so match it by source entry as well.
 		const entryId = this._findPersistedMessageEntryId(message);
-		const messages = this.agent.state.messages;
-		const index = messages.findIndex(
-			(m) => m === message || (entryId !== undefined && this._entryIdsByMessage.get(m) === entryId),
-		);
-		const toolResults: AgentMessage[] = [];
-		for (const m of index < 0 ? [] : messages.slice(index + 1)) {
-			if (m.role === "assistant") break;
-			if (m.role === "toolResult" && toolCallIds.has(m.toolCallId)) toolResults.push(m);
+		// Walk newest-first so a deferred transcript is neither materialized nor adopted. Callers pass
+		// the latest assistant message, so the walk ends right after its own results. Results newer
+		// than a later assistant message belong to that message, so reaching one discards them.
+		let toolResults: AgentMessage[] = [];
+		let found = false;
+		for (const m of this.agent.iterateMessagesReverse()) {
+			if (m === message || (entryId !== undefined && this._entryIdsByMessage.get(m) === entryId)) {
+				found = true;
+				break;
+			}
+			if (m.role === "assistant") toolResults = [];
+			else if (m.role === "toolResult" && toolCallIds.has(m.toolCallId)) toolResults.push(m);
 		}
+		if (!found) toolResults = [];
+		toolResults.reverse();
 		const targets = [message, ...toolResults];
 		const targetIds = targets.map((target) => this._findPersistedMessageEntryId(target));
 		const unresolvedProjectedTarget = targets.some(
