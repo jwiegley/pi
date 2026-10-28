@@ -983,7 +983,8 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	// RPC refreshes catalogs here in the background; interactive mode starts its refresh after TUI initialization.
+	// RPC refreshes catalogs here in the background. Interactive mode does not refresh them at startup; its model
+	// selector, /model lookups, and /login refresh them on demand.
 	if (!offlineMode && appMode === "rpc") {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 15_000);
