@@ -11,7 +11,8 @@
 
 ### Changed
 
-- Removed automatic startup model-catalog refresh and bundled Pi documentation paths from the default system prompt.
+- Removed the automatic model-catalog refresh when interactive mode starts. The model selector, `/login`, `pi auth login`, and `pi update --models` still refresh catalogs, and RPC mode still refreshes them in the background when it starts.
+- Removed the bundled Pi documentation paths from the default system prompt.
 
 ### Fixed
 
