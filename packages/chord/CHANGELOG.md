@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed `apply()`, `applyImmutable()`, and `applyImmutableBatches()` passing the items of a large splice as spread call arguments, up to 10,000 per call, and moving the array tail again for every 10,000 items; they now grow the array once, move its tail once with `copyWithin`, and assign the items in place.
+
 ## [1.5.0] - 2026-11-02
 
 ### Breaking Changes
