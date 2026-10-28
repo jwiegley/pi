@@ -24,7 +24,7 @@ Cache warming runs only when the model declares a cache lifetime and Pi estimate
 
 See [Choose a Model](models.md) for model selection and thinking controls.
 
-`enabledModels` is an explicit allowlist, for example `["anthropic/claude-sonnet-4-5", "openai-codex/gpt-5.5"]`. Provider globs and fuzzy names are not expanded; models discovered later remain outside the scope until selected with `/scoped-models`. The `--models` CLI option continues to accept patterns for one process.
+`enabledModels` is an explicit allowlist, for example `["anthropic/claude-sonnet-4-5", "openai-codex/gpt-6.1-sol"]`. Provider globs and fuzzy names are not expanded; models discovered later remain outside the scope until selected with `/scoped-models`. The `--models` CLI option continues to accept patterns for one process.
 
 ## Interaction
 
