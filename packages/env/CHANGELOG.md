@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed the daemon's `watch` operation on macOS missing content changes that FSEvents does not report beneath a watched directory: native mode now also rescans every second, or every `pollIntervalMs` when that is shorter, as `NodeExecutionEnv` does.
+
 ## [1.4.0] - 2026-10-21
 
 ## [1.3.0] - 2026-10-15
