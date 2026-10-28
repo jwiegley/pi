@@ -2,8 +2,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, getCurrentSystemMessage, type SystemMessage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import {
+	fauxAssistantMessage,
+	getCurrentSystemMessage,
+	getCurrentTools,
+	type SystemMessage,
+} from "@earendil-works/pi-ai";
+import { describe, expect, it, vi } from "vitest";
 import { buildSessionProjection, SessionManager } from "../../src/core/session-manager.ts";
 import { getUsageCostBreakdown } from "../../src/core/usage-totals.ts";
 
@@ -110,6 +115,56 @@ describe("upstream behavior with bounded history", () => {
 					.map((entry) => (entry.type === "message" ? entry.message.role : entry.type)),
 			).toEqual(["compaction", "user", "assistant"]);
 		} finally {
+			indexed.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	// Upstream #11062 restores the tool loadout from every system message on the branch, including
+	// those before a compaction, so that tools removed earlier stay inactive.
+	it("lists branch system messages across a compaction without hydrating the branch", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-history-tools-"));
+		const memory = SessionManager.inMemory(dir);
+		const indexed = SessionManager.create(dir, dir);
+		const tool = (name: string) => ({ name, description: name, parameters: { type: "object", properties: {} } });
+		let reopened: SessionManager | undefined;
+		try {
+			for (const manager of [memory, indexed]) {
+				manager.appendMessage({
+					role: "system",
+					content: "base",
+					toolsAdded: [tool("read"), tool("active_tool")],
+					timestamp: 1,
+				});
+				manager.appendMessage({ role: "user", content: "question", timestamp: 2 });
+				manager.appendMessage({ role: "system", content: "", toolsRemoved: [tool("active_tool")], timestamp: 3 });
+				const kept = manager.appendMessage({ role: "user", content: "kept", timestamp: 4 });
+				manager.appendMessage(fauxAssistantMessage("answer"));
+				manager.appendCompaction("summary", kept, 100);
+				manager.appendMessage({ role: "system", content: "", toolsAdded: [tool("grep")], timestamp: 5 });
+			}
+			indexed.flush();
+			reopened = SessionManager.open(indexed.getSessionFile()!);
+			const getBranch = vi.spyOn(reopened, "getBranch").mockImplementation(() => {
+				throw new Error("restoring tools must not hydrate the branch");
+			});
+			const loadout = (messages: SystemMessage[]) =>
+				messages.map((message) => ({
+					added: (message.toolsAdded ?? []).map(({ name }) => name),
+					removed: (message.toolsRemoved ?? []).map(({ name }) => name),
+				}));
+			const expected = [
+				{ added: ["read", "active_tool"], removed: [] },
+				{ added: [], removed: ["active_tool"] },
+				{ added: ["grep"], removed: [] },
+			];
+			expect(loadout(memory.getBranchSystemMessages())).toEqual(expected);
+			const messages = reopened.getBranchSystemMessages();
+			expect(getBranch).not.toHaveBeenCalled();
+			expect(loadout(messages)).toEqual(expected);
+			expect(getCurrentTools(messages).map(({ name }) => name)).toEqual(["read", "grep"]);
+		} finally {
+			reopened?.close();
 			indexed.close();
 			rmSync(dir, { recursive: true, force: true });
 		}

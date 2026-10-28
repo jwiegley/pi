@@ -47,7 +47,7 @@ function replayedCalls(names: string[]): { call_id: string; name: string }[] {
 			toolResult(`call_${index}`, name, 3 + 2 * index),
 		);
 	});
-	const model = getModel("openai-codex", "gpt-5.5");
+	const model = getModel("openai-codex", "gpt-6.1-sol");
 	const context = normalizeContext({ systemPrompt: "You are concise.", messages });
 	const input = convertResponsesMessages(model, context, new Set(["openai", "openai-codex", "opencode"]));
 	const outputs = input.flatMap((item) => (item.type === "function_call_output" ? [item.call_id] : []));

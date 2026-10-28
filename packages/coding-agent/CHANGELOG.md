@@ -7,6 +7,7 @@
 - Added SQLite-backed bounded session history with paged navigation, streamed export, atomic migration, and lazy active transcripts.
 - Added extension task turns with distinct steer, follow-up, and abort controls.
 - Added provider-scoped request and idle timeouts, model-local default thinking levels, and extension tool-renderer wrappers.
+- Added `models.json` schema descriptions and Models Configuration reference rows for provider `transport` timeouts and model `defaultThinkingLevel`.
 
 ### Changed
 
@@ -18,6 +19,9 @@
 - Fixed deferred footer renders retaining a replaced session after its history store closes.
 - Fixed bash output files being returned before their writes completed.
 - Fixed extension overlay disposal closing a replacement overlay.
+- Fixed `before_agent_start` handlers that read `event.prompt` without checking `messageType` failing on runs started by custom messages, such as follow-ups sent from `agent_settled`; those events now carry an empty `prompt`.
+- Preserved bounded indexed history across the v1.4.0 recovery and tool-restore updates: recovery finds a failed attempt's tool results without adopting the deferred transcript, and restoring a branch's tool loadout hydrates only its system messages.
+- Preserved per-provider transport timeouts across the v1.4.0 client identity update.
 
 ## [1.4.0] - 2026-10-21
 

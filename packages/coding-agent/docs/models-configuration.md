@@ -20,6 +20,9 @@ Each key under `providers` is a provider ID. A built-in provider ID changes that
 | `headers` | object |  | Request headers. Values resolve like apiKey. |
 | `compat` | [object](#compatibility) |  | Provider and model compatibility overrides. |
 | `authHeader` | boolean | `false` | Whether to send the resolved API key as Authorization: Bearer. |
+| `transport` | object |  | Timeouts for this provider's requests only. |
+| `transport.requestTimeoutMs` | integer |  | Request timeout in milliseconds. Takes precedence over retry.provider.timeoutMs and httpIdleTimeoutMs, but not over a per-call timeout. |
+| `transport.idleTimeoutMs` | integer |  | HTTP idle timeout in milliseconds; 0 disables it. Applies only where the API adapter uses Pi's fetch: Bedrock and WebSocket transports ignore it, and the Google Generative AI and Vertex adapters reject requests that set it. |
 | `models` | [`object[]`](#models) |  |  |
 | `modelOverrides` | [object](#model-overrides) |  |  |
 
@@ -34,6 +37,7 @@ Each `models` entry adds a model to the provider. An entry whose `id` matches an
 | `api` | string |  | Overrides the provider api. |
 | `baseUrl` | string |  | Overrides the provider baseUrl. |
 | `reasoning` | boolean | `false` | Whether the model supports thinking. |
+| `defaultThinkingLevel` | `"off"` |  | Thinking level to start with when no explicit, session, per-model, or global level applies, including after a switch from a model without thinking. Only "off" is accepted. |
 | `thinkingLevelMap` | object |  | Provider value sent for each thinking level. null marks a level unsupported. Levels the model does not map use the provider's default value through high; xhigh and max are unsupported. |
 | `input` | `("text" \| "image")[]` | `["text"]` |  |
 | `inputLimits` | [object](#input-limits) |  |  |
@@ -64,6 +68,7 @@ Each `modelOverrides` key is the ID of a built-in or extension model. Unknown ID
 |---|---|---|---|
 | `name` | string |  | Display name, also matched by --model patterns. |
 | `reasoning` | boolean |  | Whether the model supports thinking. |
+| `defaultThinkingLevel` | `"off"` |  | Thinking level to start with when no explicit, session, per-model, or global level applies, including after a switch from a model without thinking. Only "off" is accepted. |
 | `thinkingLevelMap` | object |  | Provider value sent for each thinking level. null marks a level unsupported. Levels the model does not map use the provider's default value through high; xhigh and max are unsupported. |
 | `input` | `("text" \| "image")[]` |  |  |
 | `inputLimits` | [object](#input-limits) |  |  |

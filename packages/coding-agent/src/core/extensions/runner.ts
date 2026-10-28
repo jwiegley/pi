@@ -1454,12 +1454,14 @@ export class ExtensionRunner {
 			return renderCurrentSystemPrompt();
 		};
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
+		// A run started by a custom message has no user prompt; its event carries an empty one.
+		const start = trigger.messageType === "custom" ? { ...trigger, prompt: "" as const } : trigger;
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "before_agent_start")) {
 			for (const handler of handlers) {
 				try {
 					const event: BeforeAgentStartEvent = {
-						...trigger,
+						...start,
 						type: "before_agent_start",
 						get systemPrompt() {
 							return renderCurrentSystemPrompt();
