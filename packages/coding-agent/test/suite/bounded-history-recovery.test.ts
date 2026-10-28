@@ -81,11 +81,12 @@ describe("recovery with a deferred transcript", () => {
 
 		try {
 			await harness.session.prompt("continue");
+			// Check before mockRestore(), which clears the recorded calls.
+			expect(liveRead).not.toHaveBeenCalled();
 		} finally {
 			liveRead.mockRestore();
 		}
 
-		expect(liveRead).not.toHaveBeenCalled();
 		expect(harness.getPendingResponseCount()).toBe(0);
 		expect(requestMessages.map((message) => message.role)).not.toContain("toolResult");
 		expect(requestMessages.some((m) => m.role === "assistant" && m.stopReason === "length")).toBe(false);
