@@ -18,10 +18,8 @@
 - Fixed persisted model scopes expanding provider globs and admitting newly registered models that were never selected.
 - Fixed deferred footer renders retaining a replaced session after its history store closes.
 - Fixed bash output files being returned before their writes completed.
-- Fixed extension overlay disposal closing a replacement overlay.
+- Fixed `ctx.ui.custom()` never disposing a component that its factory produced after `done()` had already been called.
 - Fixed `before_agent_start` handlers that read `event.prompt` without checking `messageType` failing on runs started by custom messages, such as follow-ups sent from `agent_settled`; those events now carry an empty `prompt`.
-- Preserved bounded indexed history across the v1.4.0 recovery and tool-restore updates: recovery finds a failed attempt's tool results without adopting the deferred transcript, and restoring a branch's tool loadout hydrates only its system messages.
-- Preserved per-provider transport timeouts across the v1.4.0 client identity update.
 
 ## [1.4.0] - 2026-10-21
 
