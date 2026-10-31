@@ -20,7 +20,6 @@
 - Fixed deferred footer renders retaining a replaced session after its history store closes.
 - Fixed bash output files being returned before their writes completed.
 - Fixed `ctx.ui.custom()` never disposing a component that its factory produced after `done()` had already been called.
-- Fixed `before_agent_start` handlers that read `event.prompt` without checking `messageType` failing on runs started by custom messages, such as follow-ups sent from `agent_settled`; those events now carry an empty `prompt`.
 
 ## [1.5.0] - 2026-11-02
 
