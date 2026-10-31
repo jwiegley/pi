@@ -1,12 +1,12 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
-import type { BeforeAgentStartEvent } from "../../src/core/extensions/index.ts";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
+import type { BeforeAgentStartCustomEvent, BeforeAgentStartEvent } from "../../src/core/extensions/index.ts";
 import { createHarness, type Harness, type HarnessOptions } from "./harness.ts";
 
-// before_agent_start also fires for runs started by custom messages, which have no user prompt.
-// Extensions written before it did read `prompt` without checking `messageType` (for example
-// pi-agent-browser-native 0.6.10 calls `prompt.trim()`), so those events carry an empty prompt.
-describe("before_agent_start prompt for runs started by custom messages", () => {
+// before_agent_start also fires for runs started by pi.sendMessage(..., { triggerTurn: true }).
+// As in upstream Pi, those events carry the starting message and no prompt, so handlers that read
+// the prompt check messageType first.
+describe("before_agent_start for runs started by custom messages", () => {
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
@@ -15,50 +15,58 @@ describe("before_agent_start prompt for runs started by custom messages", () => 
 		}
 	});
 
-	/** A harness whose before_agent_start handler reads `prompt` the way pre-union extensions do. */
-	async function createLegacyPromptHarness(extraExtensions: HarnessOptions["extensionFactories"] = []) {
+	/** A harness that records every before_agent_start event and extension error. */
+	async function createRecordingHarness(extraExtensions: NonNullable<HarnessOptions["extensionFactories"]> = []) {
 		const events: BeforeAgentStartEvent[] = [];
-		const trimmed: string[] = [];
 		const harness = await createHarness({
 			extensionFactories: [
 				(pi) => {
 					pi.on("before_agent_start", (event) => {
 						events.push(event);
-						trimmed.push(event.prompt.trim());
 					});
 				},
-				...(extraExtensions ?? []),
+				...extraExtensions,
 			],
 		});
 		harnesses.push(harness);
 		const errors: string[] = [];
 		harness.session.extensionRunner.onError((error) => errors.push(error.error));
-		return { harness, events, trimmed, errors };
+		return { harness, events, errors };
 	}
 
-	it("gives a run started by a custom message an empty prompt", async () => {
-		const { harness, events, trimmed, errors } = await createLegacyPromptHarness();
+	/** What started each run: a user prompt, or a custom message and whether its event has a prompt. */
+	const runStarts = (events: BeforeAgentStartEvent[]) =>
+		events.map((event) =>
+			event.messageType === "user"
+				? { messageType: event.messageType, prompt: event.prompt }
+				: { messageType: event.messageType, customType: event.message.customType, hasPrompt: "prompt" in event },
+		);
+
+	it("declares no prompt on custom-message events", () => {
+		expectTypeOf<BeforeAgentStartCustomEvent>().not.toHaveProperty("prompt");
+	});
+
+	it("gives a run started by sendCustomMessage its message and no prompt", async () => {
+		const { harness, events, errors } = await createRecordingHarness();
 		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
 
-		await harness.session.prompt("  hello  ");
+		await harness.session.prompt("hello");
 		await harness.session.sendCustomMessage(
 			{ customType: "task-done", content: "background task finished", display: true },
 			{ triggerTurn: true },
 		);
 
+		expect(harness.getPendingResponseCount()).toBe(0);
 		expect(errors).toEqual([]);
-		expect(events.map((event) => [event.messageType, event.prompt])).toEqual([
-			["user", "  hello  "],
-			["custom", ""],
+		expect(runStarts(events)).toEqual([
+			{ messageType: "user", prompt: "hello" },
+			{ messageType: "custom", customType: "task-done", hasPrompt: false },
 		]);
-		expect(trimmed).toEqual(["hello", ""]);
-		const custom = events[1];
-		expect(custom?.messageType === "custom" && custom.message.customType).toBe("task-done");
 	});
 
-	it("gives a follow-up sent from agent_settled an empty prompt", async () => {
+	it("gives a follow-up sent from agent_settled its message and no prompt", async () => {
 		let followUpSent = false;
-		const { harness, events, errors } = await createLegacyPromptHarness([
+		const { harness, events, errors } = await createRecordingHarness([
 			(pi) => {
 				// Workflow extensions continue a goal this way: the follow-up runs once settled
 				// handlers finish, through AgentSession.sendCustomMessage.
@@ -78,9 +86,9 @@ describe("before_agent_start prompt for runs started by custom messages", () => 
 
 		expect(harness.getPendingResponseCount()).toBe(0);
 		expect(errors).toEqual([]);
-		expect(events.map((event) => [event.messageType, event.prompt])).toEqual([
-			["user", "start"],
-			["custom", ""],
+		expect(runStarts(events)).toEqual([
+			{ messageType: "user", prompt: "start" },
+			{ messageType: "custom", customType: "goal-follow-up", hasPrompt: false },
 		]);
 	});
 });

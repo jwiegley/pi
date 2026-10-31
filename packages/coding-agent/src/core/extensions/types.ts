@@ -956,12 +956,6 @@ export interface BeforeAgentStartUserEvent extends BeforeAgentStartEventBase {
 /** A run started by `pi.sendMessage(..., { triggerTurn: true })` while idle. */
 export interface BeforeAgentStartCustomEvent extends BeforeAgentStartEventBase {
 	messageType: "custom";
-	/**
-	 * Always `""`: no user prompt starts this run. Handlers written before custom-message runs
-	 * emitted this event read `prompt` without checking `messageType`, and an empty prompt keeps
-	 * them working. Check `messageType` to tell the two kinds of run apart.
-	 */
-	prompt: "";
 	/** The custom message that starts the run. */
 	message: CustomMessage;
 }
