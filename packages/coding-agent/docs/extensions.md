@@ -1202,7 +1202,7 @@ Use this before reading project-local extension configuration that should only b
 
 ### ctx.sessionManager
 
-Read-only access to session state: `getCwd()`, `getSessionDir()`, `getSessionId()`, `getSessionFile()`, `getSessionName()`, `getHeader()`, `getEntries()`, `getEntry()`, `getBranch()`, `getTree()`, `getLeafId()`, `getLeafEntry()`, `getLabel()`, `buildContextEntries()`, and `buildSessionProjection()`. See [Session Format](session-format.md) for entry types.
+Read-only access to session state: `getCwd()`, `getSessionDir()`, `getSessionId()`, `getSessionFile()`, `getSessionName()`, `getHeader()`, `getEntries()`, `getEntry()`, `getBranch()`, `getTree()`, `getLeafId()`, `getLeafEntry()`, `getLabel()`, `getLatestCustomEntry()`, `getHistorySummary()`, `buildContextEntries()`, and `buildSessionProjection()`. See [Session Format](session-format.md) for entry types.
 
 For `tool_call`, this state is synchronized through the current assistant message before handlers run. In parallel tool execution mode it is still not guaranteed to include sibling tool results from the same assistant message.
 
@@ -1213,7 +1213,7 @@ ctx.sessionManager.buildContextEntries()    // Active branch entries with compac
 ctx.sessionManager.getLeafId()              // Current leaf entry ID
 ```
 
-For session history, use `ctx.sessionManager.getEntriesPage()`, `getTreePage()`, targeted lookups, or iterators. `getEntries()` and `getTree()` are deprecated compatibility APIs that materialize complete history.
+For session history, use `ctx.sessionManager.getEntriesPage()`, `getTreePage()`, targeted lookups, or iterators. Targeted lookups include `getLatestCustomEntry(customType, { scope })`, whose scope `"all"` (the default) spans every branch and `"active"` follows the current one, and `getHistorySummary()`, whose `entryCount` counts entries without loading them. `getEntries()` and `getTree()` are deprecated compatibility APIs that materialize complete history.
 
 ### ctx.modelRegistry / ctx.model / ctx.thinkingLevel / ctx.scopedModels
 
@@ -1692,13 +1692,14 @@ pi.appendEntry("status-card", { title: "Indexed files", count: 17 });
 
 // Restore on reload
 pi.on("session_start", async (_event, ctx) => {
-  for (const entry of ctx.sessionManager.getEntries()) {
-    if (entry.type === "custom" && entry.customType === "my-state") {
-      // Reconstruct from entry.data
-    }
+  const entry = ctx.sessionManager.getLatestCustomEntry("my-state", { scope: "all" });
+  if (entry?.type === "custom") {
+    // Reconstruct from entry.data
   }
 });
 ```
+
+`getLatestCustomEntry()` also matches custom messages of the same `customType`, so keep state entries under a `customType` of their own.
 
 ### pi.setSessionName(name)
 
@@ -1746,7 +1747,7 @@ If multiple extensions register the same command name, Pi keeps them all and ass
 pi.registerCommand("stats", {
   description: "Show session statistics",
   handler: async (args, ctx) => {
-    const count = ctx.sessionManager.getEntries().length;
+    const count = ctx.sessionManager.getHistorySummary().entryCount;
     ctx.ui.notify(`${count} entries`, "info");
   }
 });

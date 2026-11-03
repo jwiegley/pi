@@ -1403,7 +1403,7 @@ export class InteractiveMode {
 
 	private getExtensionChangelogUpdates(): ExtensionChangelogUpdate[] {
 		// Skip changelog for resumed/continued sessions (already have messages)
-		if (this.session.state.messages.length > 0) {
+		if (this.session.messageCount > 0) {
 			return [];
 		}
 
