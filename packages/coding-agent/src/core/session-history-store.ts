@@ -1266,6 +1266,8 @@ export class IndexedJsonlSessionHistoryStore {
 	private readonly sourceStateStatement: StatementSync;
 	private readonly messageByOrdinalStatement: StatementSync;
 	private readonly labelByTargetStatement: StatementSync;
+	private readonly entryCountStatement: StatementSync;
+	private readonly activeBranchMovedStatement: StatementSync;
 	private sourceFd: number | undefined;
 	private readonly cache: ByteLru;
 	private activeByOrdinal = new Map<number, SessionEntry>();
@@ -1276,6 +1278,14 @@ export class IndexedJsonlSessionHistoryStore {
 	private activeProjectionRetained = true;
 	private activeVisitorMetadata: EntryMetadata | undefined;
 	private activeVisitorEntry: SessionEntry | undefined;
+	/**
+	 * Frozen metadata of the branch that ends at volatileLeafId, root first, built by the first read after the leaf
+	 * jumps off it. Only push changes it in place, so a reader that holds it keeps the branch it started with.
+	 */
+	private activeBranch: EntryMetadata[] | undefined;
+	/** Every row below this ordinal was indexed when activeBranch was last checked. */
+	private activeBranchCheckedRows = 0;
+	private readonly activeBranchStrings = new Map<string, string>();
 	private evictedEntries = 0;
 	private evictedBytes = 0;
 	private volatileLeafId: string | null;
@@ -1298,6 +1308,15 @@ export class IndexedJsonlSessionHistoryStore {
 		this.sourceStateStatement = db.prepare("SELECT * FROM source_state WHERE singleton = 1");
 		this.messageByOrdinalStatement = db.prepare("SELECT * FROM entries WHERE message_ordinal = ?");
 		this.labelByTargetStatement = db.prepare("SELECT label, label_timestamp FROM current_labels WHERE target_id = ?");
+		this.entryCountStatement = db.prepare("SELECT entry_count FROM source_state WHERE singleton = 1");
+		this.activeBranchMovedStatement = db.prepare(`
+			SELECT 1 FROM entries AS later
+			WHERE later.ordinal >= ?
+			  AND (later.id = ? OR EXISTS (
+				SELECT 1 FROM entries AS earlier WHERE earlier.id = later.id AND earlier.ordinal < later.ordinal
+			  ))
+			LIMIT 1
+		`);
 		this.sourceFd = sourceFd;
 		this.header = header;
 		this.cache = new ByteLru(cacheBytes);
@@ -2142,7 +2161,83 @@ export class IndexedJsonlSessionHistoryStore {
 	}
 
 	getActiveBranchMetadata(): EntryMetadata[] {
-		return this.getBranchMetadata(this.volatileLeafId);
+		let branch = this.currentActiveBranch();
+		if (!branch) {
+			const checkedRows = this.indexedEntryCount();
+			branch = [];
+			for (const metadata of this.getBranchMetadata(this.volatileLeafId)) {
+				branch.push(this.retainActiveBranchMetadata(metadata, branch.at(-1)));
+			}
+			this.activeBranch = branch;
+			this.activeBranchCheckedRows = checkedRows;
+		}
+		return branch.slice();
+	}
+
+	private indexedEntryCount(): number {
+		return (this.entryCountStatement.get() as { entry_count: number }).entry_count;
+	}
+
+	/** activeBranch while it ends at volatileLeafId and no row indexed since its last check moves it. */
+	private currentActiveBranch(): EntryMetadata[] | undefined {
+		const branch = this.activeBranch;
+		if (!branch || (branch.at(-1)?.id ?? null) !== this.volatileLeafId) return undefined;
+		if (this.activeBranchRowsHold(branch)) return branch;
+		this.activeBranch = undefined;
+		return undefined;
+	}
+
+	/**
+	 * The newest row for an id wins, so rows indexed since the last check move a branch only by repeating an id or by
+	 * supplying the missing parent that its root names.
+	 */
+	private activeBranchRowsHold(branch: readonly EntryMetadata[]): boolean {
+		const rows = this.indexedEntryCount();
+		if (rows === this.activeBranchCheckedRows) return true;
+		if (this.activeBranchMovedStatement.get(this.activeBranchCheckedRows, branch[0]?.parentId ?? null)) return false;
+		this.activeBranchCheckedRows = rows;
+		return true;
+	}
+
+	/** Carry activeBranch to a new leaf: extend it by a child, cut it back to an ancestor, or drop it. */
+	private followActiveBranch(leaf: EntryRow | undefined): void {
+		const branch = this.activeBranch;
+		this.activeBranch = undefined;
+		if (!branch || !this.activeBranchRowsHold(branch)) return;
+		const tailId = branch.at(-1)?.id ?? null;
+		if (!leaf) {
+			this.activeBranch = [];
+		} else if (leaf.id === tailId) {
+			this.activeBranch = branch;
+		} else if (leaf.parent_id === tailId) {
+			branch.push(this.retainActiveBranchMetadata(toMetadata(leaf), branch.at(-1)));
+			this.activeBranch = branch;
+		} else {
+			const index = branch.findLastIndex((metadata) => metadata.id === leaf.id);
+			if (index >= 0) this.activeBranch = branch.slice(0, index + 1);
+		}
+	}
+
+	/** Freeze metadata for activeBranch, sharing its parent's id and the strings that many entries repeat. */
+	private retainActiveBranchMetadata(metadata: EntryMetadata, parent: EntryMetadata | undefined): EntryMetadata {
+		const strings = this.activeBranchStrings;
+		const shared = (value: string | undefined): string | undefined => {
+			if (value === undefined) return undefined;
+			const existing = strings.get(value);
+			if (existing !== undefined) return existing;
+			strings.set(value, value);
+			return value;
+		};
+		if (parent?.id === metadata.parentId) metadata.parentId = parent.id;
+		metadata.type = shared(metadata.type)!;
+		metadata.customType = shared(metadata.customType);
+		metadata.messageRole = shared(metadata.messageRole);
+		metadata.effectiveProvider = shared(metadata.effectiveProvider);
+		metadata.effectiveModelId = shared(metadata.effectiveModelId);
+		metadata.effectiveThinkingLevel = shared(metadata.effectiveThinkingLevel)!;
+		metadata.firstKeptEntryId = shared(metadata.firstKeptEntryId);
+		metadata.nearestCompactionId = shared(metadata.nearestCompactionId);
+		return Object.freeze(metadata);
 	}
 
 	getBranch(fromId?: string): SessionEntry[] {
@@ -2443,6 +2538,7 @@ export class IndexedJsonlSessionHistoryStore {
 					.prepare("SELECT * FROM entries WHERE id = ? ORDER BY ordinal DESC LIMIT 1")
 					.get(this.volatileLeafId) as EntryRow | undefined)
 			: undefined;
+		this.followActiveBranch(leaf);
 		this.activeEntryCount = leaf?.context_count ?? 0;
 		this.activePayloadBytes = leaf?.context_payload_bytes ?? 0;
 		this.activeProjectionRetained =
@@ -3061,6 +3157,8 @@ export class IndexedJsonlSessionHistoryStore {
 		this.activePayloadBytes = 0;
 		this.activeVisitorMetadata = undefined;
 		this.activeVisitorEntry = undefined;
+		this.activeBranch = undefined;
+		this.activeBranchStrings.clear();
 		this.cache.clear();
 		try {
 			if (this.sourceFd !== undefined) closeSync(this.sourceFd);

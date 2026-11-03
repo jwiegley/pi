@@ -18,8 +18,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { acquireSourceLock, IndexedJsonlSessionHistoryStore } from "../../src/core/session-history-store.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	acquireSourceLock,
+	type EntryMetadata,
+	IndexedJsonlSessionHistoryStore,
+} from "../../src/core/session-history-store.ts";
 import {
 	type FileEntry,
 	type SessionEntry,
@@ -27,7 +31,7 @@ import {
 	SessionManager,
 	type SessionMessageEntry,
 } from "../../src/core/session-manager.ts";
-import { DatabaseSync } from "../../src/core/sqlite.ts";
+import { DatabaseSync, type StatementSync } from "../../src/core/sqlite.ts";
 
 const roots: string[] = [];
 
@@ -117,6 +121,32 @@ function writeSession(path: string, entries: FileEntry[], finalNewline = true): 
 
 function sha256(path: string): string {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+/** The uncached walk: the newest row for each id, from the leaf back to the root. */
+function walkActiveBranch(store: IndexedJsonlSessionHistoryStore): EntryMetadata[] {
+	const branch: EntryMetadata[] = [];
+	for (let id = store.leafId; id; ) {
+		const metadata = store.getEntryMetadata(id);
+		if (!metadata) break;
+		branch.unshift(metadata);
+		id = metadata.parentId;
+	}
+	return branch;
+}
+
+/** Spy on the store's lookup of one entry by id, which the uncached walk runs once per ancestor. */
+function spyOnIdLookups(store: IndexedJsonlSessionHistoryStore) {
+	const { byId } = Reflect.get(store, "entryStatements") as { byId: StatementSync };
+	return vi.spyOn(byId, "get");
+}
+
+function linearSession(path: string, length: number): void {
+	const entries: FileEntry[] = [header()];
+	for (let index = 0; index < length; index++) {
+		entries.push(user(`q${index}`, index === 0 ? null : `q${index - 1}`, `turn ${index}`, index));
+	}
+	writeSession(path, entries);
 }
 
 describe("IndexedJsonlSessionHistoryStore", () => {
@@ -1563,5 +1593,187 @@ store.close();
 			content: [],
 		});
 		manager.close();
+	});
+});
+
+describe("IndexedJsonlSessionHistoryStore active branch metadata", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("matches the uncached walk across leaf moves, appends, and other writers", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			user("u1", null, "u1", 1),
+			assistant("a1", "u1", 1, 0),
+			user("u2", "a1", "u2", 2),
+			assistant("a2", "u2", 1, 0),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const check = (step: string) => {
+			expect(store.getActiveBranchMetadata(), step).toEqual(walkActiveBranch(store));
+		};
+
+		check("open");
+		store.append(user("u3", "a2", "u3", 3));
+		check("append on the leaf");
+		store.append(assistant("a3", "u3", 1, 0));
+		store.append(custom("c1", "a3", "state"));
+		check("two more appends");
+		store.setVolatileLeaf("u2");
+		check("leaf moved to an ancestor");
+		store.append(assistant("b1", "u2", 1, 0));
+		check("append starts a sibling branch");
+		store.setVolatileLeaf("c1");
+		check("leaf moved to the other branch");
+		store.setVolatileLeaf("a1");
+		store.setVolatileLeaf("u2");
+		check("leaf moved down to a child");
+		store.setVolatileLeaf(null);
+		check("leaf reset");
+		store.append(user("r1", null, "new root", 4));
+		check("append a new root");
+		store.setVolatileLeaf("c1");
+		store.append(compaction("k1", "c1", "a3"));
+		check("append a compaction");
+		store.append(user("u4", "k1", "after compaction", 5));
+		check("append after the compaction");
+		const other = IndexedJsonlSessionHistoryStore.open(path);
+		other.append(user("x1", "b1", "off the active path", 6));
+		check("another store appends off the active path");
+		store.append(assistant("a4", "u4", 1, 0));
+		check("own append after another store's");
+		appendFileSync(path, `${JSON.stringify(user("u3", "x1", "repeats an active-path id", 7))}\n`);
+		other.flush();
+		check("a raw row repeats an active-path id");
+		other.close();
+		const last = assistant("a5", "a4", 1, 0);
+		store.append(last);
+		store.append(last);
+		check("idempotent re-append");
+		store.setVolatileLeaf("b1");
+		check("leaf moved to an older branch");
+		store.flush();
+		check("flush adopts the newest entry");
+		const copy = store.getActiveBranchMetadata();
+		copy.reverse();
+		copy.splice(0, 2);
+		check("caller reordered and cut its copy");
+		try {
+			copy[0]!.type = "mutated";
+		} catch {}
+		check("caller tried to change a record");
+		store.close();
+	});
+
+	it("rechecks the cached branch against rows that other writers index", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "root"),
+			custom("02", "01", "middle"),
+			custom("03", "02", "kept"),
+			custom("04", "03", "leaf"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const ids = () => store.getActiveBranchMetadata().map(({ id }) => id);
+		expect(ids()).toEqual(["01", "02", "03", "04"]);
+
+		const other = IndexedJsonlSessionHistoryStore.open(path);
+		other.append(custom("05", "02", "off the active path"));
+		expect(ids()).toEqual(["01", "02", "03", "04"]);
+		expect(store.getActiveBranchMetadata()).toEqual(walkActiveBranch(store));
+
+		// The newest row for an id wins, so this row moves 03, and with it the leaf's ancestry, under 05.
+		appendFileSync(path, `${JSON.stringify(custom("03", "05", "repeats an active-path id"))}\n`);
+		other.flush();
+		expect(ids()).toEqual(["01", "02", "05", "03", "04"]);
+		expect(store.getActiveBranchMetadata()).toEqual(walkActiveBranch(store));
+		other.close();
+		store.close();
+	});
+
+	it("extends the cached branch when another writer indexes the missing parent of its root", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "elsewhere"),
+			custom("02", "missing", "orphan root"),
+			custom("03", "02", "leaf"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const ids = () => store.getActiveBranchMetadata().map(({ id }) => id);
+		expect(ids()).toEqual(["02", "03"]);
+
+		const other = IndexedJsonlSessionHistoryStore.open(path);
+		other.append(custom("missing", null, "late parent"));
+		expect(ids()).toEqual(["missing", "02", "03"]);
+		expect(store.getActiveBranchMetadata()).toEqual(walkActiveBranch(store));
+		other.close();
+		store.close();
+	});
+
+	it("reports a cycle that a repeated id closes, as the uncached walk does", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "root"),
+			custom("02", "01", "middle"),
+			custom("03", "02", "leaf"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		expect(store.getActiveBranchMetadata()).toHaveLength(3);
+
+		store.append(custom("01", "03", "repeats the root id"));
+		const cold = IndexedJsonlSessionHistoryStore.open(path);
+		expect(() => cold.getActiveBranchMetadata()).toThrow("Cycle in session ancestry at 02");
+		expect(() => store.getActiveBranchMetadata()).toThrow("Cycle in session ancestry at 02");
+		cold.close();
+		store.close();
+	});
+
+	it("hands out a detached array of frozen records on every read", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "root"),
+			custom("02", "01", "middle"),
+			custom("03", "02", "leaf"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const first = store.getActiveBranchMetadata();
+		const second = store.getActiveBranchMetadata();
+		expect(second).not.toBe(first);
+		expect(second).toEqual(first);
+
+		first.reverse();
+		first.pop();
+		expect(store.getActiveBranchMetadata()).toEqual(second);
+		expect(second.every((metadata) => Object.isFrozen(metadata))).toBe(true);
+		expect(() => {
+			second[0]!.type = "mutated";
+		}).toThrow(TypeError);
+		expect(store.getActiveBranchMetadata()[0]).toMatchObject({ id: "01", type: "custom" });
+		store.close();
+	});
+
+	it("serves warm reads and the read after an append without per-ancestor lookups", () => {
+		const path = join(createRoot(), "session.jsonl");
+		linearSession(path, 400);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		expect(store.getActiveBranchMetadata()).toHaveLength(400);
+
+		const lookups = spyOnIdLookups(store);
+		for (let read = 0; read < 5; read++) expect(store.getActiveBranchMetadata()).toHaveLength(400);
+		expect(lookups).not.toHaveBeenCalled();
+
+		store.append(user("q400", "q399", "turn 400", 400));
+		lookups.mockClear();
+		const afterAppend = store.getActiveBranchMetadata();
+		expect(lookups).not.toHaveBeenCalled();
+		expect(afterAppend).toHaveLength(401);
+		expect(afterAppend).toEqual(walkActiveBranch(store));
+		store.close();
 	});
 });

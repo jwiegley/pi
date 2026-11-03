@@ -602,3 +602,46 @@ describe("createBranchedSession", () => {
 		}
 	});
 });
+
+describe("persisted active branch metadata", () => {
+	it("matches a reopened session after appends, branches, summaries, resets, and flushes", () => {
+		const tempDir = join(tmpdir(), `session-active-branch-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+
+		try {
+			const session = SessionManager.create(tempDir, tempDir);
+			const check = (step: string) => {
+				const reopened = SessionManager.open(session.getSessionFile()!, tempDir);
+				try {
+					const leafId = session.getLeafId();
+					if (leafId === null) reopened.resetLeaf();
+					else reopened.branch(leafId);
+					expect(session.getActiveBranchMetadata(), step).toEqual(reopened.getActiveBranchMetadata());
+				} finally {
+					reopened.close();
+				}
+			};
+
+			const id1 = session.appendMessage(userMsg("1"));
+			check("first message");
+			const id2 = session.appendMessage(assistantMsg("2"));
+			session.appendMessage(userMsg("3"));
+			check("appended two messages");
+			session.branch(id1);
+			check("branched to the root");
+			session.appendMessage(assistantMsg("sibling"));
+			check("appended a sibling");
+			session.branchWithSummary(id2, "summary of the abandoned path");
+			check("branched with a summary");
+			session.resetLeaf();
+			check("reset the leaf");
+			session.appendMessage(userMsg("new root"));
+			check("appended a new root");
+			session.flush();
+			check("flushed");
+			session.close();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+});
