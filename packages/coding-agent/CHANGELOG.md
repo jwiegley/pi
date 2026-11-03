@@ -22,6 +22,7 @@
 - Fixed bash output files being returned before their writes completed.
 - Fixed `ctx.ui.custom()` never disposing a component that its factory produced after `done()` had already been called.
 - Fixed `getActiveBranchMetadata()` on a persisted session running one SQLite lookup per ancestor on every call. The indexed store now keeps the active branch's metadata, follows leaf moves and appends, and rechecks it against rows that other writers index.
+- Fixed the other active-branch reads of a persisted session (`getRecentActiveEntries()`, `findRecentActiveEntry()`, `getLatestCustomEntry()` and `getLatestMessage()` with the active scope, `iterateActiveAncestry()`, and `getBranch()` of the leaf) running one SQLite lookup per ancestor while the store keeps the active branch's metadata.
 
 ## [1.5.0] - 2026-11-02
 

@@ -1183,6 +1183,17 @@ function lastMessageForRole(messages: AgentMessage[], role?: AgentMessage["role"
 	return undefined;
 }
 
+function matchesRecentActiveFilter(
+	metadata: EntryMetadata,
+	options: Pick<RecentActiveEntriesOptions, "type" | "customType" | "messageRole">,
+): boolean {
+	return (
+		(!options.type || metadata.type === options.type) &&
+		(!options.customType || metadata.customType === options.customType) &&
+		(!options.messageRole || metadata.messageRole === options.messageRole)
+	);
+}
+
 function metadataProjectsRole(metadata: EntryMetadata, role?: AgentMessage["role"]): boolean {
 	if (role === undefined) {
 		return (
@@ -1961,6 +1972,14 @@ export class IndexedJsonlSessionHistoryStore {
 
 	getLatestCustomEntry(customType: string, scope: "all" | "active" = "all"): SessionEntry | undefined {
 		if (scope === "active") {
+			const branch = this.currentActiveBranch();
+			if (branch) {
+				const metadata = branch.findLast((candidate) => candidate.customType === customType);
+				if (metadata) return this.hydrate(metadata);
+				// Like the walk below, report a root whose parent is missing as a cycle.
+				if (branch[0]?.parentId) throw new Error(`Cycle in session ancestry at ${branch[0].parentId}`);
+				return undefined;
+			}
 			const maximumSteps = this.getHistorySummary().entryCount + 1;
 			let steps = 0;
 			let currentId = this.volatileLeafId;
@@ -1981,6 +2000,16 @@ export class IndexedJsonlSessionHistoryStore {
 
 	getLatestMessage(role?: string, scope: "all" | "active" = "all"): SessionEntry | undefined {
 		if (scope === "active") {
+			const branch = this.currentActiveBranch();
+			if (branch) {
+				const metadata = branch.findLast(
+					(candidate) => candidate.type === "message" && (!role || candidate.messageRole === role),
+				);
+				if (metadata) return this.hydrate(metadata);
+				// Like the walk below, report a root whose parent is missing as a cycle.
+				if (branch[0]?.parentId) throw new Error(`Cycle in session ancestry at ${branch[0].parentId}`);
+				return undefined;
+			}
 			const maximumSteps = this.getHistorySummary().entryCount + 1;
 			let steps = 0;
 			let currentId = this.volatileLeafId;
@@ -2014,6 +2043,17 @@ export class IndexedJsonlSessionHistoryStore {
 	getRecentActiveEntries(options: RecentActiveEntriesOptions = {}): SessionEntry[] {
 		const limit = Math.max(1, Math.min(options.limit ?? 256, 4096));
 		const result: SessionEntry[] = [];
+		const branch = this.currentActiveBranch();
+		if (branch) {
+			for (let index = branch.length - 1; index >= 0; index--) {
+				const metadata = branch[index]!;
+				if (metadata.id === options.stopBeforeId) break;
+				if (!matchesRecentActiveFilter(metadata, options)) continue;
+				result.push(this.hydrate(metadata));
+				if (result.length >= limit) break;
+			}
+			return result.reverse();
+		}
 		const maximumSteps = this.getHistorySummary().entryCount + 1;
 		let steps = 0;
 		let currentId = this.volatileLeafId;
@@ -2022,9 +2062,7 @@ export class IndexedJsonlSessionHistoryStore {
 			const metadata = this.getEntryMetadata(currentId);
 			if (!metadata) break;
 			currentId = metadata.parentId;
-			if (options.type && metadata.type !== options.type) continue;
-			if (options.customType && metadata.customType !== options.customType) continue;
-			if (options.messageRole && metadata.messageRole !== options.messageRole) continue;
+			if (!matchesRecentActiveFilter(metadata, options)) continue;
 			result.push(this.hydrate(metadata));
 			if (result.length >= limit) break;
 		}
@@ -2036,6 +2074,18 @@ export class IndexedJsonlSessionHistoryStore {
 		options: Omit<RecentActiveEntriesOptions, "limit">,
 		predicate: (entry: SessionEntry) => boolean,
 	): SessionEntry | undefined {
+		const branch = this.currentActiveBranch();
+		if (branch) {
+			// The store only pushes onto this array, so a predicate that appends or moves the leaf cannot disturb the walk.
+			for (let index = branch.length - 1; index >= 0; index--) {
+				const metadata = branch[index]!;
+				if (metadata.id === options.stopBeforeId) break;
+				if (!matchesRecentActiveFilter(metadata, options)) continue;
+				const entry = this.hydrate(metadata);
+				if (predicate(entry)) return entry;
+			}
+			return undefined;
+		}
 		const maximumSteps = this.getHistorySummary().entryCount + 1;
 		let steps = 0;
 		let currentId = this.volatileLeafId;
@@ -2044,9 +2094,7 @@ export class IndexedJsonlSessionHistoryStore {
 			const metadata = this.getEntryMetadata(currentId);
 			if (!metadata) break;
 			currentId = metadata.parentId;
-			if (options.type && metadata.type !== options.type) continue;
-			if (options.customType && metadata.customType !== options.customType) continue;
-			if (options.messageRole && metadata.messageRole !== options.messageRole) continue;
+			if (!matchesRecentActiveFilter(metadata, options)) continue;
 			const entry = this.hydrate(metadata);
 			if (predicate(entry)) return entry;
 		}
@@ -2241,7 +2289,9 @@ export class IndexedJsonlSessionHistoryStore {
 	}
 
 	getBranch(fromId?: string): SessionEntry[] {
-		return this.getBranchMetadata(fromId ?? this.volatileLeafId).map((metadata) => this.hydrate(metadata));
+		const leafId = fromId ?? this.volatileLeafId;
+		const branch = leafId === this.volatileLeafId ? this.currentActiveBranch() : undefined;
+		return (branch ?? this.getBranchMetadata(leafId)).map((metadata) => this.hydrate(metadata));
 	}
 
 	iterateBranchEntries(fromId: string, visitor: (entry: SessionEntry, metadata: EntryMetadata) => void): void {
@@ -2816,6 +2866,22 @@ export class IndexedJsonlSessionHistoryStore {
 	}
 
 	async iterateActiveAncestry(visitor: (metadata: EntryMetadata) => void | Promise<void>): Promise<void> {
+		const branch = this.currentActiveBranch();
+		if (branch) {
+			// The store only pushes onto this array, so a visitor that appends or moves the leaf cannot disturb the walk.
+			// Each visitor gets its own copy of the record, as from the walk below.
+			for (let index = branch.length - 1; index >= 0; index--) {
+				const metadata = { ...branch[index]! };
+				this.activeVisitorMetadata = metadata;
+				try {
+					await visitor(metadata);
+				} finally {
+					this.activeVisitorEntry = undefined;
+					this.activeVisitorMetadata = undefined;
+				}
+			}
+			return;
+		}
 		const maximumSteps = this.getHistorySummary().entryCount + 1;
 		let visited = 0;
 		let currentId = this.volatileLeafId;

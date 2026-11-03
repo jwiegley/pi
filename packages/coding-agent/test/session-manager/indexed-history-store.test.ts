@@ -141,6 +141,87 @@ function spyOnIdLookups(store: IndexedJsonlSessionHistoryStore) {
 	return vi.spyOn(byId, "get");
 }
 
+function note(id: string, parentId: string | null, content: string): SessionEntry {
+	return {
+		type: "custom_message",
+		id,
+		parentId,
+		timestamp: `2026-01-01T00:00:${id.padStart(2, "0")}.000Z`,
+		customType: "note",
+		content,
+		display: true,
+	};
+}
+
+type ActiveRead = (store: IndexedJsonlSessionHistoryStore) => unknown;
+
+/** Reads that follow the active branch, keyed by name; each returns its result or the message it throws. */
+const activeBranchReads: Record<string, ActiveRead> = {
+	recent: (store) => store.getRecentActiveEntries(),
+	recentLimited: (store) => store.getRecentActiveEntries({ limit: 2 }),
+	recentUsers: (store) => store.getRecentActiveEntries({ type: "message", messageRole: "user", limit: 3 }),
+	recentThreadAfter02: (store) => store.getRecentActiveEntries({ customType: "thread", stopBeforeId: "02" }),
+	recentNotes: (store) => store.getRecentActiveEntries({ type: "custom_message" }),
+	recentStopAtLeaf: (store) => store.getRecentActiveEntries({ stopBeforeId: store.leafId ?? undefined }),
+	recentStopOffBranch: (store) => store.getRecentActiveEntries({ stopBeforeId: "09", limit: 5000 }),
+	findAssistant: (store) =>
+		store.findRecentActiveEntry(
+			{ type: "message" },
+			(entry) => entry.type === "message" && entry.message.role === "assistant",
+		),
+	findThreadAfter04: (store) => store.findRecentActiveEntry({ customType: "thread", stopBeforeId: "04" }, () => true),
+	findNothing: (store) => store.findRecentActiveEntry({}, () => false),
+	latestThread: (store) => store.getLatestCustomEntry("thread", "active"),
+	latestElsewhere: (store) => store.getLatestCustomEntry("elsewhere", "active"),
+	latestAbsentCustom: (store) => store.getLatestCustomEntry("absent", "active"),
+	latestMessage: (store) => store.getLatestMessage(undefined, "active"),
+	latestUser: (store) => store.getLatestMessage("user", "active"),
+	latestToolResult: (store) => store.getLatestMessage("toolResult", "active"),
+	branch: (store) => store.getBranch(),
+	branchFromLeaf: (store) => store.getBranch(store.leafId ?? undefined),
+	ancestry: async (store) => {
+		const visited: Array<{ id: string; entry: string | undefined }> = [];
+		await store.iterateActiveAncestry((metadata) => {
+			const entry = store.getEntry(metadata.id);
+			expect(store.getEntry(metadata.id)).toBe(entry);
+			visited.push({ id: metadata.id, entry: entry?.id });
+		});
+		return visited;
+	},
+};
+
+async function settle(read: () => unknown): Promise<{ value: unknown } | { error: string }> {
+	try {
+		return { value: await read() };
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/**
+ * Run every active-branch read on a store whose branch metadata is built and on a fresh store at the same leaf,
+ * which still walks the index. Return both outcomes and the warm store's per-ancestor lookups.
+ */
+async function compareActiveBranchReads(store: IndexedJsonlSessionHistoryStore) {
+	const cold = IndexedJsonlSessionHistoryStore.open(store.filePath);
+	try {
+		cold.setVolatileLeaf(store.leafId);
+		store.getActiveBranchMetadata();
+		const lookups = spyOnIdLookups(store);
+		const warm: Record<string, unknown> = {};
+		const expected: Record<string, unknown> = {};
+		for (const [name, read] of Object.entries(activeBranchReads)) {
+			warm[name] = await settle(() => read(store));
+			expected[name] = await settle(() => read(cold));
+		}
+		const calls = lookups.mock.calls.length;
+		lookups.mockRestore();
+		return { warm, expected, lookups: calls };
+	} finally {
+		cold.close();
+	}
+}
+
 function linearSession(path: string, length: number): void {
 	const entries: FileEntry[] = [header()];
 	for (let index = 0; index < length; index++) {
@@ -1774,6 +1855,167 @@ describe("IndexedJsonlSessionHistoryStore active branch metadata", () => {
 		expect(lookups).not.toHaveBeenCalled();
 		expect(afterAppend).toHaveLength(401);
 		expect(afterAppend).toEqual(walkActiveBranch(store));
+		store.close();
+	});
+});
+
+describe("IndexedJsonlSessionHistoryStore active branch readers", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("answer from the built branch exactly as the index walk does", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			user("01", null, "first question", 1),
+			assistant("02", "01", 1, 0),
+			custom("03", "02", "thread state", "thread"),
+			user("04", "03", "second question", 4),
+			assistant("05", "04", 1, 0),
+			note("06", "05", "a note"),
+			custom("07", "06", "newer thread state", "thread"),
+			user("08", "07", "third question", 8),
+			custom("09", "05", "abandoned state", "elsewhere"),
+			compaction("10", "08", "04"),
+			user("11", "10", "after compaction", 11),
+			assistant("12", "11", 1, 0),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const check = async (step: string) => {
+			const { warm, expected, lookups } = await compareActiveBranchReads(store);
+			expect(warm, step).toEqual(expected);
+			expect(lookups, step).toBe(0);
+		};
+
+		await check("leaf at the newest entry");
+		store.setVolatileLeaf("08");
+		await check("leaf moved to an ancestor");
+		store.setVolatileLeaf("09");
+		await check("leaf on the abandoned branch");
+		store.setVolatileLeaf("06");
+		await check("leaf on a note");
+		store.setVolatileLeaf("12");
+		store.append(user("13", "12", "appended", 13));
+		await check("after an append");
+		store.setVolatileLeaf(null);
+		await check("leaf reset");
+		store.close();
+	});
+
+	it("make no per-ancestor lookups for reads that walk the whole branch today", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		linearSession(path, 400);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const cold = IndexedJsonlSessionHistoryStore.open(path);
+		expect(store.getActiveBranchMetadata()).toHaveLength(400);
+		const reads: Record<string, ActiveRead> = {
+			recentNotes: (target) => target.getRecentActiveEntries({ type: "custom_message" }),
+			findCustom: (target) => target.findRecentActiveEntry({ type: "custom" }, () => true),
+			latestAbsentCustom: (target) => target.getLatestCustomEntry("absent", "active"),
+			latestAssistant: (target) => target.getLatestMessage("assistant", "active"),
+			ancestry: async (target) => {
+				const ids: string[] = [];
+				await target.iterateActiveAncestry(({ id }) => {
+					ids.push(id);
+				});
+				return ids;
+			},
+			branch: (target) => target.getBranch().map(({ id }) => id),
+		};
+		for (const [name, read] of Object.entries(reads)) {
+			const lookups = spyOnIdLookups(store);
+			const value = await read(store);
+			expect(lookups, name).not.toHaveBeenCalled();
+			lookups.mockRestore();
+			expect(value, name).toEqual(await read(cold));
+		}
+		cold.close();
+		store.close();
+	});
+
+	it("walk the index without building the branch when it is not built", () => {
+		const path = join(createRoot(), "session.jsonl");
+		linearSession(path, 400);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const lookups = spyOnIdLookups(store);
+		expect(store.getRecentActiveEntries({ limit: 1 }).map(({ id }) => id)).toEqual(["q399"]);
+		expect(store.getLatestMessage("user", "active")).toMatchObject({ id: "q399" });
+		expect(lookups).toHaveBeenCalledTimes(2);
+		lookups.mockClear();
+		expect(store.getActiveBranchMetadata()).toHaveLength(400);
+		expect(lookups).toHaveBeenCalledTimes(400);
+		store.close();
+	});
+
+	it("keep today's results for a root whose parent is missing", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "elsewhere", "elsewhere"),
+			custom("02", "missing", "orphan root", "thread"),
+			user("03", "02", "question", 3),
+			custom("04", "03", "leaf state", "thread"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const { warm, expected, lookups } = await compareActiveBranchReads(store);
+		expect(warm).toEqual(expected);
+		expect(lookups).toBe(0);
+		expect(warm.latestAbsentCustom).toEqual({ error: "Cycle in session ancestry at missing" });
+		store.close();
+	});
+
+	it("throw today's cycle error after a repeated id closes a loop", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			user("01", null, "root", 1),
+			custom("02", "01", "middle"),
+			user("03", "02", "leaf", 3),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		expect(store.getActiveBranchMetadata()).toHaveLength(3);
+		store.append(user("01", "03", "repeats the root id", 4));
+
+		const cold = IndexedJsonlSessionHistoryStore.open(path);
+		for (const [name, read] of Object.entries(activeBranchReads)) {
+			expect(await settle(() => read(store)), name).toEqual(await settle(() => read(cold)));
+		}
+		expect(await settle(() => store.getRecentActiveEntries())).toEqual({
+			error: "Cycle in session ancestry at 02",
+		});
+		cold.close();
+		store.close();
+	});
+
+	it("keep walking the branch they started with when a callback appends or moves the leaf", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		linearSession(path, 6);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const original = store.getActiveBranchMetadata().map(({ id }) => id);
+		let appended = 0;
+		const appendUnderRoot = () => {
+			store.setVolatileLeaf("q0");
+			store.append(user(`side-${appended}`, "q0", "side branch", 100 + appended++));
+		};
+
+		const visited: string[] = [];
+		await store.iterateActiveAncestry(({ id }) => {
+			if (visited.length === 0) appendUnderRoot();
+			visited.push(id);
+		});
+		expect(visited).toEqual([...original].reverse());
+
+		store.setVolatileLeaf("q5");
+		store.getActiveBranchMetadata();
+		const checked: string[] = [];
+		const found = store.findRecentActiveEntry({ type: "message" }, (entry) => {
+			if (checked.length === 0) appendUnderRoot();
+			checked.push(entry.id);
+			return entry.id === "q1";
+		});
+		expect(found).toMatchObject({ id: "q1" });
+		expect(checked).toEqual(["q5", "q4", "q3", "q2", "q1"]);
 		store.close();
 	});
 });
