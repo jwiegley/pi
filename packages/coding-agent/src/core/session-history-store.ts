@@ -614,20 +614,6 @@ function generationMatches(state: SourceStateRow, generation: SourceGeneration):
 	);
 }
 
-function lastIndexedRecordMatches(state: SourceStateRow, filePath: string): boolean {
-	if (state.last_record_offset === null || state.last_record_length === null || !state.last_record_sha256) return true;
-	const fd = openSync(filePath, "r");
-	try {
-		const bytes = Buffer.allocUnsafe(state.last_record_length);
-		return (
-			readExactSync(fd, bytes, state.last_record_offset) &&
-			digest(bytes).equals(Buffer.from(state.last_record_sha256))
-		);
-	} finally {
-		closeSync(fd);
-	}
-}
-
 function indexedPrefixMatches(state: SourceStateRow, filePath: string): boolean {
 	try {
 		const scan = scanPhysicalLines(filePath, 0, () => true, EMPTY_PREFIX_CHAIN, state.indexed_length);
@@ -661,6 +647,38 @@ function indexedDescriptorMatches(state: SourceStateRow, fd: number, filePath: s
 		return (
 			scan.indexedLength === state.indexed_length &&
 			scan.prefixChainSha256.equals(Buffer.from(state.prefix_chain_sha256))
+		);
+	} catch {
+		return false;
+	}
+}
+
+/** Re-hash the indexed prefix. Unlike isVerifiedIndexedPrefix, accept an indexed final record that has no LF yet. */
+function indexedSourceMatches(state: SourceStateRow, filePath: string): boolean {
+	const fd = openSync(filePath, "r");
+	try {
+		return indexedDescriptorMatches(state, fd, filePath);
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * Whether the descriptor still has the indexed generation and size and its last indexed record is unchanged. Under the
+ * source lock, an outside writer gets past this only with an equal-size edit to an earlier line that keeps the
+ * timestamps; indexIsUsable re-hashes the whole prefix at the next open.
+ */
+function indexedDescriptorUnchanged(state: SourceStateRow, fd: number): boolean {
+	try {
+		const current = sourceDescriptorState(fd);
+		if (current.size !== state.indexed_length || !generationMatches(state, current)) return false;
+		if (state.last_record_offset === null || state.last_record_length === null || !state.last_record_sha256) {
+			return true;
+		}
+		const bytes = Buffer.allocUnsafe(state.last_record_length);
+		return (
+			readExactSync(fd, bytes, state.last_record_offset) &&
+			digest(bytes).equals(Buffer.from(state.last_record_sha256))
 		);
 	} catch {
 		return false;
@@ -1498,8 +1516,10 @@ export class IndexedJsonlSessionHistoryStore {
 			if (stats.size < state.indexed_length) return false;
 			const generation = sourceGeneration(filePath);
 			if (stats.size === state.indexed_length) {
+				// Appends trust an unchanged generation, size and last record, so every open re-hashes the indexed prefix.
+				// An equal-size edit to an earlier line that keeps all three is caught here, and the index is rebuilt.
 				return generationMatches(state, generation)
-					? lastIndexedRecordMatches(state, filePath)
+					? indexedSourceMatches(state, filePath)
 					: isVerifiedIndexedPrefix(state, filePath, stats.size);
 			}
 			return isVerifiedIndexedPrefix(state, filePath, stats.size);
@@ -2958,7 +2978,7 @@ export class IndexedJsonlSessionHistoryStore {
 			let appendVerified = false;
 			let closeFailure: { error: unknown } | undefined;
 			try {
-				if (!indexedDescriptorMatches(state, fd, this.filePath)) {
+				if (!indexedDescriptorUnchanged(state, fd) && !indexedDescriptorMatches(state, fd, this.filePath)) {
 					throw new Error("Session JSONL changed outside the indexed writer before append");
 				}
 				let size = fstatSync(fd).size;
