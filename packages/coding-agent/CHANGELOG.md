@@ -13,6 +13,7 @@
 
 - Removed the automatic model-catalog refresh when interactive mode starts. The model selector, `/login`, `pi auth login`, and `pi update --models` still refresh catalogs, and RPC mode still refreshes them in the background when it starts.
 - Removed the bundled Pi documentation paths from the default system prompt.
+- `getActiveBranchMetadata()` on a persisted session returns frozen records, in a new array on every call.
 
 ### Fixed
 
@@ -20,6 +21,7 @@
 - Fixed deferred footer renders retaining a replaced session after its history store closes.
 - Fixed bash output files being returned before their writes completed.
 - Fixed `ctx.ui.custom()` never disposing a component that its factory produced after `done()` had already been called.
+- Fixed `getActiveBranchMetadata()` on a persisted session running one SQLite lookup per ancestor on every call. The indexed store now keeps the active branch's metadata, follows leaf moves and appends, and rechecks it against rows that other writers index.
 
 ## [1.5.2] - 2026-11-10
 
