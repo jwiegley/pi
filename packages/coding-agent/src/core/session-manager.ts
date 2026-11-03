@@ -1645,6 +1645,17 @@ async function listSessionsFromDir(
 }
 
 /**
+ * An appended entry reached the session file, but the history store over the file failed to open. The entry stays
+ * the session's leaf, and the next append retries the open. `cause` holds the open's error.
+ */
+export class SessionHistoryStoreOpenError extends Error {
+	constructor(sessionFile: string, cause: unknown) {
+		super(`Wrote to ${sessionFile}, but could not open its history store: ${String(cause)}`, { cause });
+		this.name = "SessionHistoryStoreOpenError";
+	}
+}
+
+/**
  * Manages conversation sessions as append-only trees stored in JSONL files.
  *
  * Each session entry has an id and parentId forming a tree structure. The "leaf"
@@ -1878,19 +1889,20 @@ export class SessionManager {
 				closeSync(fd);
 			}
 			this.flushed = true;
-			this.historyStore = IndexedJsonlSessionHistoryStore.open(this.sessionFile);
-			this.fileEntries = [];
-			this.byId.clear();
-			this.labelsById.clear();
-			this.labelTimestampsById.clear();
 		} else {
 			appendFileSync(this.sessionFile, sessionJsonLine(entry));
-			this.historyStore = IndexedJsonlSessionHistoryStore.open(this.sessionFile);
-			this.fileEntries = [];
-			this.byId.clear();
-			this.labelsById.clear();
-			this.labelTimestampsById.clear();
 		}
+		// The file now holds every entry in memory. If its store fails to open, memory still matches the file,
+		// and the next append writes its line through the flushed branch above and retries the open.
+		try {
+			this.historyStore = IndexedJsonlSessionHistoryStore.open(this.sessionFile);
+		} catch (error) {
+			throw new SessionHistoryStoreOpenError(this.sessionFile, error);
+		}
+		this.fileEntries = [];
+		this.byId.clear();
+		this.labelsById.clear();
+		this.labelTimestampsById.clear();
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1906,6 +1918,9 @@ export class SessionManager {
 		try {
 			this._persist(entry);
 		} catch (error) {
+			// The entry is in the file when only its store failed to open, so it stays the leaf and later
+			// entries chain to it.
+			if (error instanceof SessionHistoryStoreOpenError) throw error;
 			// Keep memory in line with the file: an entry that was not written must not become the
 			// parent of later entries, or the file would hold entries pointing to a missing parent.
 			this.fileEntries.pop();
@@ -2223,7 +2238,14 @@ export class SessionManager {
 			targetId,
 			label,
 		};
-		this._appendEntry(entry);
+		let storeOpenError: SessionHistoryStoreOpenError | undefined;
+		try {
+			this._appendEntry(entry);
+		} catch (error) {
+			// _appendEntry keeps the entry when only the history store failed to open, so its label applies too.
+			if (!(error instanceof SessionHistoryStoreOpenError)) throw error;
+			storeOpenError = error;
+		}
 		if (label) {
 			this.labelsById.set(targetId, label);
 			this.labelTimestampsById.set(targetId, entry.timestamp);
@@ -2231,6 +2253,7 @@ export class SessionManager {
 			this.labelsById.delete(targetId);
 			this.labelTimestampsById.delete(targetId);
 		}
+		if (storeOpenError) throw storeOpenError;
 		return entry.id;
 	}
 

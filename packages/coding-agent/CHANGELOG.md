@@ -25,6 +25,7 @@
 - Fixed `getActiveBranchMetadata()` on a persisted session running one SQLite lookup per ancestor on every call. The indexed store now keeps the active branch's metadata, follows leaf moves and appends, and rechecks it against rows that other writers index.
 - Fixed the other active-branch reads of a persisted session (`getRecentActiveEntries()`, `findRecentActiveEntry()`, `getLatestCustomEntry()` and `getLatestMessage()` with the active scope, `iterateActiveAncestry()`, and `getBranch()` of the leaf) running one SQLite lookup per ancestor while the store keeps the active branch's metadata.
 - Fixed every append to a persisted session re-reading and re-hashing the whole session JSONL. Under the source lock, an append now trusts an unchanged source generation, size, and last record that ends with LF, and re-hashes otherwise. Opening a session now re-hashes its indexed prefix and rebuilds the index when the prefix no longer matches.
+- Fixed a label change that was written to the session file not taking effect until the history store next opened, when the store failed to open after the write.
 
 ## [1.5.2] - 2026-11-10
 
