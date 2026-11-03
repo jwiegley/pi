@@ -664,11 +664,14 @@ function indexedSourceMatches(state: SourceStateRow, filePath: string): boolean 
 }
 
 /**
- * Whether the descriptor still has the indexed generation and size and its last indexed record is unchanged. Under the
- * source lock, an outside writer gets past this only with an equal-size edit to an earlier line that keeps the
- * timestamps; indexIsUsable re-hashes the whole prefix at the next open.
+ * Whether the descriptor still has the indexed generation and size and its last indexed record is unchanged and ends with
+ * LF. Under the source lock, an outside writer gets past this only with an equal-size edit to an earlier line that keeps
+ * the timestamps; indexIsUsable re-hashes the whole prefix at the next open.
  */
 function indexedDescriptorUnchanged(state: SourceStateRow, fd: number): boolean {
+	// Before appending after a record without LF, append's newline repair re-derives the prefix chain from the file,
+	// which would certify an edit that this check let through.
+	if (state.final_line_terminated === 0) return false;
 	try {
 		const current = sourceDescriptorState(fd);
 		if (current.size !== state.indexed_length || !generationMatches(state, current)) return false;
