@@ -19,6 +19,7 @@
 
 - Fixed persisted model scopes expanding provider globs and admitting newly registered models that were never selected.
 - Fixed deferred footer renders retaining a replaced session after its history store closes.
+- Fixed `/bug` loading a session's whole deferred transcript into memory, and keeping it there, to count its messages and to write its summary.
 - Fixed bash output files being returned before their writes completed.
 - Fixed `ctx.ui.custom()` never disposing a component that its factory produced after `done()` had already been called.
 - Fixed `getActiveBranchMetadata()` on a persisted session running one SQLite lookup per ancestor on every call. The indexed store now keeps the active branch's metadata, follows leaf moves and appends, and rechecks it against rows that other writers index.
