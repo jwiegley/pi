@@ -2041,6 +2041,40 @@ describe("IndexedJsonlSessionHistoryStore active branch readers", () => {
 		store.close();
 	});
 
+	it("walk and throw today's cycle error once a root with a missing parent heads every indexed row", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("02", "missing", "orphan root"),
+			custom("03", "02", "middle"),
+			custom("04", "03", "leaf"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		store.setVolatileLeaf("03");
+		expect(store.getActiveBranchMetadata().map(({ id }) => id)).toEqual(["02", "03"]);
+		// Moving down to an existing child extends the built branch to all three rows without indexing one.
+		store.setVolatileLeaf("04");
+
+		const cold = IndexedJsonlSessionHistoryStore.open(path);
+		const reads: Record<string, ActiveRead> = {
+			metadata: (target) => target.getActiveBranchMetadata().map(({ id }) => id),
+			branch: (target) => target.getBranch().map(({ id }) => id),
+			recentNotes: (target) => target.getRecentActiveEntries({ type: "custom_message" }),
+			findNothing: (target) => target.findRecentActiveEntry({}, () => false),
+			...activeBranchReads,
+		};
+		for (const [name, read] of Object.entries(reads)) {
+			expect(await settle(() => read(store)), name).toEqual(await settle(() => read(cold)));
+		}
+		for (const name of ["metadata", "branch", "recentNotes", "findNothing"]) {
+			expect(await settle(() => reads[name](store)), name).toEqual({
+				error: "Cycle in session ancestry at missing",
+			});
+		}
+		cold.close();
+		store.close();
+	});
+
 	it("throw today's cycle error after a repeated id closes a loop", async () => {
 		const path = join(createRoot(), "session.jsonl");
 		writeSession(path, [

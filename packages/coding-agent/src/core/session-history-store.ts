@@ -2250,9 +2250,14 @@ export class IndexedJsonlSessionHistoryStore {
 	private currentActiveBranch(): EntryMetadata[] | undefined {
 		const branch = this.activeBranch;
 		if (!branch || (branch.at(-1)?.id ?? null) !== this.volatileLeafId) return undefined;
-		if (this.activeBranchRowsHold(branch)) return branch;
-		this.activeBranch = undefined;
-		return undefined;
+		if (!this.activeBranchRowsHold(branch)) {
+			this.activeBranch = undefined;
+			return undefined;
+		}
+		// The walk counts a step for the missing parent that a root names, so once the branch holds every indexed row it
+		// throws a cycle error. Leave such a branch to the walk.
+		if (branch[0]?.parentId && branch.length >= this.activeBranchCheckedRows) return undefined;
+		return branch;
 	}
 
 	/**
