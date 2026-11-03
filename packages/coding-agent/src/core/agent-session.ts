@@ -4580,7 +4580,7 @@ export class AgentSession {
 		}
 		return generateBugReportSummary({
 			...(await this._getSummarizationRequestAuth(model, options.signal)),
-			messages: this.messages,
+			messages: this.agent.getMessagesSnapshot(),
 			hint: options.hint,
 			signal: options.signal,
 			streamFn: this.agent.streamFunction,
