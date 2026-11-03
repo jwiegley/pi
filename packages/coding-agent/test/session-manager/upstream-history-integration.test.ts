@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
@@ -9,7 +9,12 @@ import {
 	type SystemMessage,
 } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { buildSessionProjection, SessionManager } from "../../src/core/session-manager.ts";
+import { IndexedJsonlSessionHistoryStore } from "../../src/core/session-history-store.ts";
+import {
+	buildSessionProjection,
+	SessionHistoryStoreOpenError,
+	SessionManager,
+} from "../../src/core/session-manager.ts";
 import { getUsageCostBreakdown } from "../../src/core/usage-totals.ts";
 
 describe("upstream behavior with bounded history", () => {
@@ -271,6 +276,143 @@ describe("upstream behavior with bounded history", () => {
 				reopened.close();
 			}
 		} finally {
+			manager.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	// Upstream's #11486 rolls an append back when writing it fails. Bounded history opens the history store after
+	// the write, and an entry that is already in the file must stay the leaf when only that open fails.
+	it.each([
+		["creating the file", (dir: string) => SessionManager.create(dir, dir)],
+		[
+			"appending to a file without a store",
+			(dir: string) => {
+				// Opening an empty file writes a header and leaves the session flushed without a store.
+				const file = join(dir, "empty.jsonl");
+				writeFileSync(file, "");
+				return SessionManager.open(file, dir);
+			},
+		],
+	])("keeps a written entry as the leaf when the history store fails to open after %s", (_, create) => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-history-open-"));
+		const manager = create(dir);
+		const failure = new Error("database or disk is full");
+		const open = vi.spyOn(IndexedJsonlSessionHistoryStore, "open").mockImplementationOnce(() => {
+			throw failure;
+		});
+		let reopened: SessionManager | undefined;
+		try {
+			let thrown: unknown;
+			try {
+				manager.appendMessage({ role: "user", content: "question", timestamp: 1 });
+			} catch (error) {
+				thrown = error;
+			}
+			expect(thrown).toBeInstanceOf(SessionHistoryStoreOpenError);
+			expect((thrown as Error).cause).toBe(failure);
+			const question = manager.getLeafEntry();
+			expect(question).toMatchObject({ type: "message", parentId: null, message: { content: "question" } });
+			expect(manager.getEntries()).toEqual([question]);
+
+			const answer = manager.appendMessage(fauxAssistantMessage("answer"));
+			expect(manager.getEntry(answer)?.parentId).toBe(question!.id);
+			expect(open).toHaveBeenCalledTimes(2);
+			expect(manager.getHistoryMetrics()).toBeDefined();
+
+			reopened = SessionManager.open(manager.getSessionFile()!);
+			expect(reopened.getEntries().map((entry) => entry.id)).toEqual([question!.id, answer]);
+			expect(reopened.getBranch().map((entry) => entry.id)).toEqual([question!.id, answer]);
+		} finally {
+			open.mockRestore();
+			reopened?.close();
+			manager.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	// Once an open has failed, the next append writes its own line before it retries the open. When that write fails,
+	// #11486's rollback still applies, and the entry that the failed open kept stays the leaf.
+	it("rolls back an entry that fails to write after the history store failed to open", ({ skip }) => {
+		skip(process.getuid?.() === 0, "root can write a read-only file, so chmod cannot make the append fail");
+		const dir = mkdtempSync(join(tmpdir(), "pi-history-open-write-"));
+		const manager = SessionManager.create(dir, dir);
+		const open = vi.spyOn(IndexedJsonlSessionHistoryStore, "open").mockImplementationOnce(() => {
+			throw new Error("database or disk is full");
+		});
+		let reopened: SessionManager | undefined;
+		try {
+			expect(() => manager.appendMessage({ role: "user", content: "question", timestamp: 1 })).toThrow(
+				SessionHistoryStoreOpenError,
+			);
+			const question = manager.getLeafId();
+			const entries = manager.getEntries();
+			expect(entries.map((entry) => entry.id)).toEqual([question]);
+			expect(manager.getHistoryMetrics()).toBeUndefined();
+
+			const file = manager.getSessionFile()!;
+			let thrown: unknown;
+			chmodSync(file, 0o444);
+			try {
+				manager.appendMessage(fauxAssistantMessage("lost"));
+			} catch (error) {
+				thrown = error;
+			} finally {
+				chmodSync(file, 0o644);
+			}
+			expect(thrown).not.toBeInstanceOf(SessionHistoryStoreOpenError);
+			// The write's own error: EACCES on POSIX, EPERM on Windows.
+			expect(["EACCES", "EPERM"]).toContain((thrown as NodeJS.ErrnoException | undefined)?.code);
+			expect(manager.getLeafId()).toBe(question);
+			expect(manager.getEntries()).toEqual(entries);
+			// The rollback also drops the entry from the id map, which counts entries while the store is closed.
+			expect(manager.getEntryCount()).toBe(1);
+			expect(open).toHaveBeenCalledTimes(1);
+
+			const answer = manager.appendMessage(fauxAssistantMessage("answer"));
+			expect(manager.getEntry(answer)?.parentId).toBe(question);
+			expect(open).toHaveBeenCalledTimes(2);
+			expect(manager.getHistoryMetrics()).toBeDefined();
+
+			reopened = SessionManager.open(file);
+			expect(reopened.getEntries().map((entry) => entry.id)).toEqual([question, answer]);
+			expect(reopened.getBranch().map((entry) => entry.id)).toEqual([question, answer]);
+		} finally {
+			open.mockRestore();
+			reopened?.close();
+			manager.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("applies a label whose entry was written when the history store fails to open", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-history-open-label-"));
+		const manager = SessionManager.create(dir, dir);
+		const fail = () => {
+			throw new Error("database or disk is full");
+		};
+		const open = vi.spyOn(IndexedJsonlSessionHistoryStore, "open").mockImplementationOnce(fail);
+		open.mockImplementationOnce(fail);
+		let reopened: SessionManager | undefined;
+		try {
+			expect(() => manager.appendMessage({ role: "user", content: "question", timestamp: 1 })).toThrow(
+				SessionHistoryStoreOpenError,
+			);
+			const question = manager.getLeafId()!;
+			expect(() => manager.appendLabelChange(question, "keep")).toThrow(SessionHistoryStoreOpenError);
+			expect(manager.getLabel(question)).toBe("keep");
+
+			const answer = manager.appendMessage(fauxAssistantMessage("answer"));
+			expect(manager.getLabel(question)).toBe("keep");
+
+			reopened = SessionManager.open(manager.getSessionFile()!);
+			expect(reopened.getLabel(question)).toBe("keep");
+			expect(reopened.getEntries().map((entry) => entry.type)).toEqual(["message", "label", "message"]);
+			expect(reopened.getBranch().map((entry) => entry.type)).toEqual(["message", "label", "message"]);
+			expect(reopened.getLeafId()).toBe(answer);
+		} finally {
+			open.mockRestore();
+			reopened?.close();
 			manager.close();
 			rmSync(dir, { recursive: true, force: true });
 		}
