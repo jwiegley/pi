@@ -10,7 +10,7 @@ type ExtensionChangelogUpdate = { name: string; version: string; markdown: strin
 
 type ExtensionChangelogContext = {
 	session: {
-		state: { messages: unknown[] };
+		readonly messageCount: number;
 		resourceLoader: { getExtensions(): { extensions: Array<{ sourceInfo: SourceInfo }> } };
 	};
 	settingsManager: SettingsManager;
@@ -55,7 +55,9 @@ describe("InteractiveMode extension changelog", () => {
 	function createContext(): ExtensionChangelogContext {
 		return {
 			session: {
-				state: { messages },
+				get messageCount() {
+					return messages.length;
+				},
 				resourceLoader: {
 					getExtensions: () => ({
 						// Two extensions from the same package must only produce one changelog section.
