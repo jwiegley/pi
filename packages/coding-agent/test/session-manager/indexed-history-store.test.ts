@@ -222,6 +222,82 @@ async function compareActiveBranchReads(store: IndexedJsonlSessionHistoryStore) 
 	}
 }
 
+/** Record the source's current generation in its sidecar, as a filesystem with coarse timestamps would keep it. */
+function keepIndexedGeneration(indexPath: string, path: string): void {
+	const stats = statSync(path, { bigint: true });
+	const db = new DatabaseSync(indexPath);
+	db.prepare(
+		"UPDATE source_state SET source_dev = ?, source_ino = ?, source_mtime_ns = ?, source_ctime_ns = ? WHERE singleton = 1",
+	).run(Number(stats.dev), Number(stats.ino), stats.mtimeNs.toString(), stats.ctimeNs.toString());
+	db.close();
+}
+
+async function runWorker(workerPath: string, args: string[]): Promise<string> {
+	const child = spawn(process.execPath, ["--experimental-strip-types", workerPath, ...args], {
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let stdout = "";
+	let stderr = "";
+	child.stdout.on("data", (chunk) => {
+		stdout += chunk.toString();
+	});
+	child.stderr.on("data", (chunk) => {
+		stderr += chunk.toString();
+	});
+	await new Promise<void>((resolve, reject) => {
+		child.once("exit", (code) => (code === 0 ? resolve() : reject(new Error(`worker exited ${code}: ${stderr}`))));
+		child.once("error", reject);
+	});
+	return stdout;
+}
+
+/**
+ * Open a session, append two entries, and print how many bytes of the session JSONL each append read. With a
+ * replacement path, the first append's open of the JSONL first swaps in a byte-identical copy under a new inode.
+ */
+const appendReadsWorker = `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const [targetPath, replacementPath] = process.argv.slice(2);
+const path = fs.realpathSync(targetPath);
+const { openSync, closeSync, readSync } = fs;
+const sourceFds = new Set();
+let bytesRead = 0;
+let replaced = false;
+fs.openSync = function(pathArg, flags, mode) {
+  if (replacementPath && !replaced && pathArg === path && flags === "a+") {
+    fs.copyFileSync(path, replacementPath);
+    fs.renameSync(replacementPath, path);
+    replaced = true;
+  }
+  const fd = mode === undefined ? openSync(pathArg, flags) : openSync(pathArg, flags, mode);
+  if (pathArg === path) sourceFds.add(fd);
+  return fd;
+};
+fs.closeSync = function(fd) {
+  sourceFds.delete(fd);
+  return closeSync(fd);
+};
+fs.readSync = function(fd, ...rest) {
+  const read = readSync(fd, ...rest);
+  if (sourceFds.has(fd)) bytesRead += read;
+  return read;
+};
+syncBuiltinESMExports();
+const { IndexedJsonlSessionHistoryStore } = await import(${JSON.stringify(new URL("../../src/core/session-history-store.ts", import.meta.url).href)});
+const store = IndexedJsonlSessionHistoryStore.open(path);
+const appendReads = [];
+for (let index = 0; index < 2; index++) {
+  const before = bytesRead;
+  store.append({
+    type: "custom", id: "appended-" + index, parentId: store.leafId,
+    timestamp: "2026-01-01T00:02:0" + index + ".000Z", customType: "test", data: index,
+  });
+  appendReads.push(bytesRead - before);
+}
+process.stdout.write(JSON.stringify({ appendReads, replaced, entryCount: store.getHistorySummary().entryCount }) + "\\n");
+store.close();
+`;
+
 function linearSession(path: string, length: number): void {
 	const entries: FileEntry[] = [header()];
 	for (let index = 0; index < length; index++) {
@@ -2017,5 +2093,108 @@ describe("IndexedJsonlSessionHistoryStore active branch readers", () => {
 		expect(found).toMatchObject({ id: "q1" });
 		expect(checked).toEqual(["q5", "q4", "q3", "q2", "q1"]);
 		store.close();
+	});
+});
+
+describe("IndexedJsonlSessionHistoryStore append integrity", () => {
+	it("appends without re-reading the indexed prefix while its generation, size, and last record hold", async () => {
+		const root = createRoot();
+		const path = join(root, "session.jsonl");
+		const workerPath = join(root, "append-reads.ts");
+		const entries: FileEntry[] = [header()];
+		for (let index = 0; index < 64; index++) {
+			entries.push(user(`m${index}`, index === 0 ? null : `m${index - 1}`, "x".repeat(2048), index));
+		}
+		writeSession(path, entries);
+		writeFileSync(workerPath, appendReadsWorker);
+		const prefixBytes = statSync(path).size;
+
+		const result = JSON.parse(await runWorker(workerPath, [path])) as { appendReads: number[]; entryCount: number };
+		expect(result.entryCount).toBe(66);
+		expect(result.appendReads).toHaveLength(2);
+		for (const bytes of result.appendReads) expect(bytes).toBeLessThan(prefixBytes / 4);
+	}, 30_000);
+
+	it("re-hashes the indexed prefix when the append opens a replaced file", async () => {
+		const root = createRoot();
+		const path = join(root, "session.jsonl");
+		const workerPath = join(root, "append-reads.ts");
+		const entries: FileEntry[] = [header()];
+		for (let index = 0; index < 64; index++) {
+			entries.push(user(`m${index}`, index === 0 ? null : `m${index - 1}`, "x".repeat(2048), index));
+		}
+		writeSession(path, entries);
+		writeFileSync(workerPath, appendReadsWorker);
+		const prefixBytes = statSync(path).size;
+
+		const result = JSON.parse(await runWorker(workerPath, [path, join(root, "replacement.jsonl")])) as {
+			appendReads: number[];
+			replaced: boolean;
+			entryCount: number;
+		};
+		expect(result.replaced).toBe(true);
+		expect(result.entryCount).toBe(66);
+		expect(result.appendReads[0]).toBeGreaterThanOrEqual(prefixBytes);
+	}, 30_000);
+
+	it("re-hashes the indexed prefix and refuses the append when the last indexed record changed", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "first"),
+			custom("02", "01", "middle"),
+			custom("03", "02", "last"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const before = readFileSync(path, "utf8");
+		const edited = before.replace('"data":"middle"', '"data":"edited"').replace('"data":"last"', '"data":"lost"');
+		expect(Buffer.byteLength(edited)).toBe(Buffer.byteLength(before));
+		writeFileSync(path, edited);
+		keepIndexedGeneration(store.indexPath, path);
+
+		expect(() => store.append(custom("04", "03", "after"))).toThrow(
+			"Session JSONL changed outside the indexed writer before append",
+		);
+		expect(readFileSync(path, "utf8")).toBe(edited);
+		store.close();
+	});
+
+	it("rebuilds at open after an equal-length edit that keeps the generation, size, and last record", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "first"),
+			custom("02", "01", "middle"),
+			custom("03", "02", "last"),
+		]);
+		const first = IndexedJsonlSessionHistoryStore.open(path);
+		const indexPath = first.indexPath;
+		first.close();
+
+		const before = readFileSync(path, "utf8");
+		const after = before.replace('"id":"02","parentId":"01"', '"id":"02","parentId":"99"');
+		expect(after).not.toBe(before);
+		expect(Buffer.byteLength(after)).toBe(Buffer.byteLength(before));
+		writeFileSync(path, after);
+		keepIndexedGeneration(indexPath, path);
+
+		const reopened = IndexedJsonlSessionHistoryStore.open(path);
+		expect(reopened.getEntryMetadata("02")?.parentId).toBe("99");
+		expect(reopened.getBranch("03").map((entry) => entry.id)).toEqual(["02", "03"]);
+		reopened.close();
+	});
+
+	it("keeps the index of a valid final record without LF across a reopen", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [header(), custom("01", null, "first"), custom("02", "01", "unsealed")], false);
+		const first = IndexedJsonlSessionHistoryStore.open(path);
+		const indexPath = first.indexPath;
+		first.close();
+		const indexInode = statSync(indexPath).ino;
+
+		const reopened = IndexedJsonlSessionHistoryStore.open(path);
+		expect(statSync(indexPath).ino).toBe(indexInode);
+		expect(reopened.getEntry("02")).toMatchObject({ data: "unsealed" });
+		reopened.close();
 	});
 });
