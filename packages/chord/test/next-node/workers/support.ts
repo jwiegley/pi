@@ -14,7 +14,7 @@ import * as chordNext from "../../../src/next/index.ts";
 import { createPlugins, type Plugins } from "../../../src/next-node/plugins/index.ts";
 import { createWorkers, type Workers, type WorkersError } from "../../../src/next-node/workers/index.ts";
 import { Session, type WorkerBehaviour } from "../fixtures/workers/control.ts";
-import { EVENT_TEST, fileEventsSettled } from "../plugins/support.ts";
+import { EVENT_TEST, EVENT_WAIT, fileEventsSettled } from "../plugins/support.ts";
 
 /** The server's own kind. */
 export const Server = hostKind("server");
@@ -61,7 +61,7 @@ export type Fleet = {
 	readonly output: string[];
 	/** Each address's behaviour (its start data); none: a plain worker. */
 	readonly behaviours: Map<string, WorkerBehaviour>;
-	/** Writes `label` into the copy's notes plugin; resolves once the watcher has every event of the write. */
+	/** Writes `label` into the copy's notes plugin: every watch live before the write, its events waited for after. */
 	label(label: string): Promise<void>;
 };
 
@@ -137,6 +137,9 @@ export async function fleet(
 		output,
 		behaviours,
 		label: async (label) => {
+			// On macOS a watch made shortly before the write (the watcher's, or the helper's own at its first call)
+			// restarts libuv's FSEvents stream, which can lose the write's event.
+			await fileEventsSettled();
 			await writeFile(join(root, "notes", "label.ts"), `export const label = ${JSON.stringify(label)};\n`);
 			await fileEventsSettled();
 		},
@@ -152,4 +155,4 @@ export async function until(ready: () => boolean, ms = 10_000): Promise<void> {
 	}
 }
 
-export { context, EVENT_TEST, Session };
+export { context, EVENT_TEST, EVENT_WAIT, fileEventsSettled, Session };

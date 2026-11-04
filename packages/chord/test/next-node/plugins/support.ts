@@ -94,10 +94,14 @@ afterAll(async () => {
 });
 
 /**
- * Resolves once every file change made so far has reached this process's watches, and every watch made so far is live:
- * a watched directory of its own gets a new file every 250 ms until one's event arrives (events arrive in order). On
- * macOS a watch goes live only after `fs.watch` returned, FSEvents reports changes made shortly before that (a
- * fixture's writes), and its events arrive late; with inotify (Linux) the first file's event arrives at once.
+ * Waits for the file events of the changes made so far: a watched directory of its own gets a new file every 250 ms
+ * until one's event arrives, by when every watch made before the call is live. With inotify (Linux) events arrive at
+ * once and in order, so every earlier change has then reached this process's watches. FSEvents (macOS) makes that
+ * likely, not certain: a watch goes live only after `fs.watch` returned (seconds later on a busy machine), it reports
+ * changes made shortly before that (a fixture's writes), it delivers late, now and then twice or after the event of a
+ * later change, and it can drop one; a test still waits for each mark it checks. There every watch added or closed
+ * restarts libuv's one FSEvents stream, which can lose the changes made just before, this helper's own watch (made at
+ * its first call) too: call it after making a watcher and before the writes a test waits for.
  */
 export async function fileEventsSettled(): Promise<void> {
 	if (sentinels === undefined) {
