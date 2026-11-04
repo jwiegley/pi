@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed `apply()`, `applyImmutable()`, and `applyImmutableBatches()` passing the items of a large splice as spread call arguments, up to 10,000 per call, and moving the array tail again for every 10,000 items; they now grow the array once, move its tail once with `copyWithin`, and assign the items in place.
+- Fixed Chord v2's `processLock` on macOS spinning until its context ended when a regular file sat at the lock's path (connecting to it fails `ENOTSOCK` there, `ECONNREFUSED` on Linux); it now fails closed naming the file, as for a socket file nobody listens on.
 
 ## [1.5.0] - 2026-11-02
 

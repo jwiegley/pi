@@ -89,6 +89,9 @@ function listened(server: Server, address: string): Promise<boolean> {
 	});
 }
 
+/** A connect's errors that mean nobody accepts on the path: a socket file nobody listens on, or no socket there. */
+const NOBODY_ACCEPTS = new Set(["ECONNREFUSED", "ENOTSOCK"]);
+
 /**
  * Connects to the holder of `address` and resolves when that connection closes or the address is gone (`true`: try
  * again), or with `false` when nobody accepts on it (a leftover socket file); `context`'s abort rejects.
@@ -115,7 +118,8 @@ function waitWhileHeld(address: string, context: Context): Promise<boolean> {
 			connected = true;
 		});
 		socket.on("error", (error: NodeJS.ErrnoException) => {
-			if (!connected && error.code === "ECONNREFUSED") settle(false);
+			// A regular file at the path is ENOTSOCK on macOS (ECONNREFUSED on Linux); retrying would spin.
+			if (!connected && NOBODY_ACCEPTS.has(error.code ?? "")) settle(false);
 		});
 		socket.once("close", () => settle(true));
 	});
