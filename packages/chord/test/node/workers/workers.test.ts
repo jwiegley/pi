@@ -635,7 +635,9 @@ describe("fix round 1", { timeout: EVENT_TEST }, () => {
 		const { server, workers, errors } = await fleet({ start: () => new Promise<never>(() => {}) });
 		const notes = server.hold(Notes, { id: "S1" }, context);
 		await new Promise((resolve) => setTimeout(resolve, 50));
+		const started = Date.now();
 		await workers.close(context);
+		expect(Date.now() - started).toBeLessThan(5_000);
 		forked = stateOf(workers.state.value, "S1") !== undefined;
 		expect([forked, errors]).toEqual([false, []]);
 		notes.release();
@@ -647,8 +649,11 @@ describe("fix round 1", { timeout: EVENT_TEST }, () => {
 		behaviours.set("S1", { loadMs: 5_000, closeMs: 200, log: join(dir, "log") });
 		const notes = server.hold(Notes, { id: "S1" }, context);
 		await until(() => stateOf(workers.state.value, "S1") !== undefined);
+		const starting = Date.now();
 		await new Promise((resolve) => setTimeout(resolve, 300));
 		await workers.stop(Session({ id: "S1" }), context);
+		// Before the worker's 5 s load could have ended: the stop did not wait for it.
+		expect(Date.now() - starting).toBeLessThan(5_000);
 		expect(errors).toEqual([]);
 		expect(await readFile(join(dir, "log"), "utf8")).toBe("store\nhost\n");
 		notes.release();
@@ -661,12 +666,15 @@ describe("fix round 1", { timeout: EVENT_TEST }, () => {
 		await label("v2");
 		await until(() => plugins.state.value.dirty.length > 0, EVENT_WAIT);
 		const built = await plugins.build(plugins.state.value.dirty, context);
+		const started = Date.now();
 		await control.blockThenCrash(600, context);
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		const first = plugins.rollout([workers.step("one")], built, context);
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		const second = plugins.rollout([workers.step("two")], built, context);
 		const outcomes = await Promise.all([first, second]);
+		// Both settled at the child's crash, well within the suite's timeout (EVENT_TEST, for the label's file events).
+		expect(Date.now() - started).toBeLessThan(5_000);
 		expect(outcomes.map((result) => listed(result.steps[0]!.hosts))).toEqual([
 			[["session|S1", "worker: its link is gone"]],
 			[["session|S1", "worker: its link is gone"]],
