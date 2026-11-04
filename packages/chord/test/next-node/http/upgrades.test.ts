@@ -1,9 +1,9 @@
 // Tests of upgraded connections (slice 10 §2, D6, Q6; decisions "allowed hosts only through contributions", "plugin
 // sockets get a heartbeat"): the links endpoint (`host.accept`, options per socket, refused sockets, the 1 MiB frame
-// default, the output cap), plugin sockets (handed to their handler, an oversized frame closing only that socket, a
-// throwing handler), connections terminated at once when their socket handler or host leaves (a raw peer can act no
-// more), an upgrade checked again after authenticating, the heartbeat, close bounded for a peer that never answers,
-// and nothing kept of a closed socket or its `ws` server.
+// default and a clean close after a larger one, the output cap), plugin sockets (handed to their handler, an oversized
+// frame closing only that socket, a throwing handler), connections terminated at once when their socket handler or host
+// leaves (a raw peer can act no more), an upgrade checked again after authenticating, the heartbeat, close bounded for
+// a peer that never answers, and nothing kept of a closed socket or its `ws` server.
 
 import { once } from "node:events";
 import { connect, type Socket } from "node:net";
@@ -114,6 +114,38 @@ describe("the links endpoint", () => {
 		const closed = closeOf(socket);
 		socket.send(Buffer.alloc(1024 * 1024 + 1));
 		expect((await closed).code).toBe(1009);
+		await server.close();
+	});
+
+	// A Node client on macOS closed with 1006: the socket was terminated while the client still sent its frame.
+	it("closes a socket that sends a larger frame cleanly: its close frame (1009), then the end, never a reset", async () => {
+		const server = await served({}, { config: { links: { path: "/chord" } } });
+		const raw = await rawSocket(server.port, `127.0.0.1:${server.port}`, "/chord");
+		let received = Buffer.alloc(0);
+		raw.on("data", (data: Buffer) => {
+			received = Buffer.concat([received, data]);
+		});
+		let ended: string | undefined;
+		raw.once("end", () => {
+			ended ??= "end";
+		});
+		raw.once("error", (error: NodeJS.ErrnoException) => {
+			ended ??= `error ${error.code}`;
+		});
+		// A masked binary frame of 1 MiB + 1 (its mask all zeros), its payload sent until the connection ends.
+		const header = Buffer.alloc(14);
+		header[0] = 0x82;
+		header[1] = 0x80 | 127;
+		header.writeBigUInt64BE(BigInt(1024 * 1024 + 1), 2);
+		raw.write(header);
+		const chunk = Buffer.alloc(64 * 1024);
+		for (let sent = 0; ended === undefined && sent < 8 * 1024 * 1024; sent += chunk.length) {
+			raw.write(chunk);
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		await vi.waitFor(() => expect(ended).toBeDefined());
+		expect([ended, received.includes(Buffer.from([0x88, 0x02, 0x03, 0xf1]))]).toEqual(["end", true]);
+		raw.destroy();
 		await server.close();
 	});
 

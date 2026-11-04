@@ -140,10 +140,16 @@ export class Upgrades {
 		for (const upgraded of this.#open) end(upgraded);
 	}
 
-	/** Keeps `upgraded` until its socket closes; an error (an oversized frame) terminates only that socket. */
+	/**
+	 * Keeps `upgraded` until its socket closes. An error (an oversized frame) closes only that socket, and `ws` closes it
+	 * itself: the close frame the error calls for (1009), the connection ended once that frame is out, what the peer
+	 * still sends read and dropped, the connection destroyed at its close timeout.
+	 */
 	#keep(upgraded: Upgraded): void {
 		const { socket } = upgraded;
-		socket.on("error", () => socket.terminate());
+		// Only so that the error does not throw. Terminating here reset the connection while the peer still sent the rest
+		// of its frame, and a peer could miss the close frame: a Node client on macOS closed with 1006, not 1009.
+		socket.on("error", () => {});
 		this.#open.add(upgraded);
 		socket.once("close", () => this.#open.delete(upgraded));
 	}
