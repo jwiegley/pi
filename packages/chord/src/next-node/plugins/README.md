@@ -88,7 +88,8 @@ await plugins.rollout([plugins.step("server", server), workers.step("workers")],
     build (not the object `build` returned), it clears no marks.
   - `installDependencies(name, ctx)` (the install mark clears, the plugin turns dirty), `close()` (the watcher stops).
 - **The watcher** (`fs.watch` on every directory of the roots, the base code and plugin directories linked from
-  outside the roots, never on `node_modules` or `.git`; a directory appearing later under a watched one gets its watch,
+  outside the roots, never on `node_modules` or `.git`; a directory appearing later under a watched one gets its watch;
+  on macOS one recursive `fs.watch` per tree instead, whose changes under `node_modules` and `.git` are never marked;
   a root missing at `createPlugins` is not watched: the app builds on demand) marks, never applies: a changed file
   dirties every plugin whose facets read it (a copied contract every user) and the plugin whose directory holds it; a
   `package.json` sets `install` (and the next build reads the plugin's metadata again; a plugin the next discovery no
