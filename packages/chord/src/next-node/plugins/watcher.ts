@@ -1,10 +1,11 @@
 // The watcher and its marks (slice 7c §5): `fs.watch` on every directory of the plugin roots and the app's base code,
-// `node_modules` and `.git` never watched (a directory appearing later gets its watch), marks what changed and never
-// applies it. A changed file dirties every plugin whose facets used it (a copied contract every user) or whose directory
-// contains it; a changed `package.json` asks for an install (and for its metadata to be read again); a plugin directory
-// or facet file added or removed asks for discovery again; a file of base code asks the app to restart its hosts. The
-// marks are a JSON watchable; each mark records the generation of its latest change (generations only increase), so a
-// change during a build keeps its mark, however late an older build's rollout clears.
+// `node_modules` and `.git` never watched (a directory appearing later gets its watch; on macOS one recursive watch per
+// tree, which sees them too, and changes under them are never marked), marks what changed and never applies it. A
+// changed file dirties every plugin whose facets used it (a copied contract every user) or whose directory contains
+// it; a changed `package.json` asks for an install (and for its metadata to be read again); a plugin directory or facet
+// file added or removed asks for discovery again; a file of base code asks the app to restart its hosts. The marks are
+// a JSON watchable; each mark records the generation of its latest change (generations only increase), so a change
+// during a build keeps its mark, however late an older build's rollout clears.
 
 import { type Dirent, type FSWatcher, lstatSync, readdirSync, realpathSync, watch } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -39,6 +40,14 @@ export type WatcherOptions = {
 
 /** Directories never watched, and changes under them never marked. */
 const IGNORED = new Set(["node_modules", ".git"]);
+
+/**
+ * Whether a tree is watched by one recursive watch rather than a watch per directory: on macOS. libuv serves an event
+ * loop's watches there from one FSEvents stream that it stops and starts anew for every watch added or closed, so a
+ * watch per directory lost the changes made in any tree while a directory came or went (a file written into a new
+ * directory right after its watch was added, among them); FSEvents watches a whole tree anyway.
+ */
+const RECURSIVE = process.platform === "darwin";
 
 /**
  * The watcher and the marks (`state`), a JSON watchable published at most once per microtask turn with changes. It
@@ -200,7 +209,10 @@ export class PluginWatcher extends Source {
 		return this.#options.kinds.some((kind) => FACET_EXTENSIONS.some((extension) => file === `${kind}${extension}`));
 	}
 
-	/** Watches the tree at `dir` (once): it and every directory under it but ignored ones; a missing one is skipped. */
+	/**
+	 * Watches the tree at `dir` (once): it and every directory under it but ignored ones, on macOS in one recursive watch;
+	 * a missing one is skipped.
+	 */
 	#watchTree(dir: string): void {
 		if (this.#trees.has(dir)) return;
 		this.#trees.add(dir);
@@ -213,12 +225,15 @@ export class PluginWatcher extends Source {
 		this.#unwatchDirs(dir);
 	}
 
-	/** Watches `dir` and, walking down, every directory under it but ignored ones (each not watched yet). */
+	/**
+	 * Watches `dir` and, walking down, every directory under it but ignored ones (each not watched yet); on macOS `dir`
+	 * alone, recursively.
+	 */
 	#watchDirs(dir: string): void {
 		if (this.#watchers.has(dir) || this.#reported) return;
 		let watcher: FSWatcher;
 		try {
-			watcher = watch(dir, (_event, file) => {
+			watcher = watch(dir, { recursive: RECURSIVE }, (_event, file) => {
 				if (file !== null) this.#changedIn(join(dir, file));
 			});
 		} catch (error) {
@@ -227,6 +242,7 @@ export class PluginWatcher extends Source {
 		}
 		watcher.on("error", (error) => this.#failed(error));
 		this.#watchers.set(dir, watcher);
+		if (RECURSIVE) return;
 		let entries: Dirent[];
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });
@@ -239,10 +255,13 @@ export class PluginWatcher extends Source {
 		}
 	}
 
-	/** An event for `path` in a watched directory: a new directory gets its watches, a removed one loses them; marked. */
+	/**
+	 * An event for `path` in a watched directory: a new directory gets its watches, a removed one loses them (a recursive
+	 * watch covers both); marked.
+	 */
 	#changedIn(path: string): void {
 		const name = basename(path);
-		if (!IGNORED.has(name)) {
+		if (!RECURSIVE && !IGNORED.has(name)) {
 			if (isDirectory(path)) this.#watchDirs(path);
 			else if (this.#watchers.has(path)) this.#unwatchDirs(path);
 		}
