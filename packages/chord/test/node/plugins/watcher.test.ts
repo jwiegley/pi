@@ -144,11 +144,15 @@ describe("the watcher's marks", { timeout: EVENT_TEST }, () => {
 
 	it("marks from real file events, publishing the marks to a watch", async () => {
 		const { root, watcher } = await watched(true);
+		const mark = vi.spyOn(watcher, "mark");
 		const changes = changesOf(await watcher.watch(context));
 		await writeFile(join(root, "a", "node_modules-free.ts"), "export {};");
-		await writeFiles(join(root, "b", "node_modules", "pkg"), { "index.js": "" });
-		// Both writes' events have arrived (FSEvents' late): the one under node_modules marked nothing.
-		await settleFileEvents();
+		const modules = join(root, "b", "node_modules");
+		await writeFiles(join(modules, "pkg"), { "index.js": "" });
+		// The write under node_modules was reported (FSEvents can report it after a later change) and marked nothing.
+		await vi.waitFor(() => expect(mark.mock.calls.some(([path]) => path.startsWith(modules))).toBe(true), {
+			timeout: EVENT_WAIT,
+		});
 		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: EVENT_WAIT });
 		await delivered();
 		expect(changes.at(-1)).toMatchObject({ kind: "value", value: { dirty: ["@test/a"] } });
