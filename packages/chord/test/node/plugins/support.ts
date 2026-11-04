@@ -1,12 +1,14 @@
 // Test support for the plugins component (slice 7c, slice 12): fixture plugins copied into temporary roots, plugins, npm
-// packages and local bare git repositories written there (no network), and the host packages the fixtures import.
+// packages and local bare git repositories written there (no network), the host packages the fixtures import, and
+// waiting for file system events.
 
 import { execFileSync } from "node:child_process";
+import { type FSWatcher, watch } from "node:fs";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach } from "vitest";
+import { afterAll, afterEach } from "vitest";
 import * as chord from "../../../src/index.ts";
 import type { HostPackages, KindDefinition } from "../../../src/node/plugins/index.ts";
 
@@ -43,9 +45,51 @@ export async function tempRoot(fixtures: readonly string[] = []): Promise<string
 	return root;
 }
 
-/** Separates fixture writes and watch registration across macOS FSEvents' buffered batches. */
+/** How long a test waits for a file system event: FSEvents (macOS) delivers late, by seconds on a busy machine. */
+export const EVENT_WAIT = 20_000;
+
+/** The timeout of a test that waits for file system events. */
+export const EVENT_TEST = 60_000;
+
+/** The directory `settleFileEvents` writes into and its watch, made at its first call. */
+let sentinels: { readonly dir: string; readonly watcher: FSWatcher; readonly seen: Set<string> } | undefined;
+let sentinel = 0;
+
+afterAll(async () => {
+	if (sentinels === undefined) return;
+	sentinels.watcher.close();
+	await rm(sentinels.dir, { recursive: true, force: true });
+	sentinels = undefined;
+});
+
+/**
+ * Resolves once every file change made so far has reached this process's watches, and every watch made so far is live:
+ * a watched directory of its own gets a new file every 250 ms until one's event arrives (events arrive in order). On
+ * macOS a watch goes live only after `fs.watch` returned, FSEvents reports changes made shortly before that (a
+ * fixture's writes), and its events arrive late; with inotify (Linux) the first file's event arrives at once.
+ */
 export async function settleFileEvents(): Promise<void> {
-	if (process.platform === "darwin") await new Promise((resolve) => setTimeout(resolve, 250));
+	if (sentinels === undefined) {
+		const dir = await mkdtemp(join(tmpdir(), "chord-events-"));
+		const seen = new Set<string>();
+		const watcher = watch(dir, { persistent: false }, (_event, file) => {
+			if (file !== null) seen.add(file);
+		});
+		sentinels = { dir, watcher, seen };
+	}
+	const { dir, seen } = sentinels;
+	const written: string[] = [];
+	const arrived = () => written.some((name) => seen.has(name));
+	const deadline = Date.now() + EVENT_WAIT;
+	while (!arrived()) {
+		if (Date.now() > deadline) throw new Error(`settleFileEvents: no event from ${dir} in ${EVENT_WAIT} ms`);
+		const name = `${sentinel++}`;
+		written.push(name);
+		await writeFile(join(dir, name), "");
+		for (const until = Date.now() + 250; Date.now() < until && !arrived(); ) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
 }
 
 /** Writes `files` (relative path to text) into `dir`, creating directories. */

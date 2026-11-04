@@ -14,7 +14,7 @@ import type { JsonValue } from "../../../src/json.ts";
 import { createPlugins, type Plugins } from "../../../src/node/plugins/index.ts";
 import { createWorkers, type Workers, type WorkersError } from "../../../src/node/workers/index.ts";
 import { Session, type WorkerBehaviour } from "../fixtures/workers/control.ts";
-import { settleFileEvents } from "../plugins/support.ts";
+import { EVENT_TEST, settleFileEvents } from "../plugins/support.ts";
 
 /** The server's own kind. */
 export const Server = hostKind("server");
@@ -62,7 +62,7 @@ export type Fleet = {
 	readonly output: string[];
 	/** Each address's behaviour (its start data); none: a plain worker. */
 	readonly behaviours: Map<string, WorkerBehaviour>;
-	/** Writes `label` into the copy's notes plugin. */
+	/** Writes `label` into the copy's notes plugin; resolves once the watcher has every event of the write. */
 	label(label: string): Promise<void>;
 };
 
@@ -156,4 +156,4 @@ export async function until(ready: () => boolean, ms = 10_000): Promise<void> {
 	}
 }
 
-export { context, Session };
+export { context, EVENT_TEST, Session };
