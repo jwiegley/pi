@@ -27,7 +27,17 @@ import {
 	transported,
 	valuesOf,
 } from "../../next/support.ts";
-import { HOST_PACKAGES, kindsOf, tempRoot, writeFiles, writePackage, writePlugin } from "./support.ts";
+import {
+	EVENT_TEST,
+	EVENT_WAIT,
+	fileEventsSettled,
+	HOST_PACKAGES,
+	kindsOf,
+	tempRoot,
+	writeFiles,
+	writePackage,
+	writePlugin,
+} from "./support.ts";
 
 /** The fixtures' contracts, as the `contracts` fixture declares them. */
 const Worker = hostKind("test.worker");
@@ -58,8 +68,11 @@ function reportOf(hosts: readonly RolloutHost[]): ReloadReport {
 	return entry.report;
 }
 
-/** The component over `root`, its reports collected. */
-function component(root: string): { plugins: Plugins; reported: unknown[] } {
+/**
+ * The component over `root`, its reports collected, its watcher live and done reporting the fixture's writes: FSEvents
+ * (macOS) reports changes made shortly before a watch began, which before the first discovery only ask for discovery.
+ */
+async function component(root: string): Promise<{ plugins: Plugins; reported: unknown[] }> {
 	const reported: unknown[] = [];
 	const plugins = createPlugins(
 		{
@@ -69,6 +82,7 @@ function component(root: string): { plugins: Plugins; reported: unknown[] } {
 		},
 		context,
 	);
+	await fileEventsSettled();
 	return { plugins, reported };
 }
 
@@ -76,7 +90,7 @@ function component(root: string): { plugins: Plugins; reported: unknown[] } {
 const failedNames = (report: { readonly failed: readonly { readonly plugin: string }[] }) =>
 	report.failed.map(({ plugin }) => plugin);
 
-describe("per plugin at startup", () => {
+describe("per plugin at startup", { timeout: EVENT_TEST }, () => {
 	it("leaves out a plugin whose build fails, whose evaluation throws or whose setup throws; loads the others and core", async () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "good", "good");
@@ -88,7 +102,7 @@ describe("per plugin at startup", () => {
 			"worker.ts":
 				'import { defineFacet } from "@earendil-works/chord/next";\nexport default defineFacet(() => { throw new Error("in setup"); });',
 		});
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		const host = createHost({ onError: () => {} });
 		const core = defineFacet((h) => h.serve(Item, () => ({ label: constant("core") })));
 		const report = await plugins.load(
@@ -112,12 +126,12 @@ describe("per plugin at startup", () => {
 	});
 });
 
-describe("per plugin at reload", () => {
+describe("per plugin at reload", { timeout: EVENT_TEST }, () => {
 	/** A host loaded with plugins `a`, `b` and `c` (worker facets), and the component. */
 	async function loaded() {
 		const root = await tempRoot();
 		for (const dir of ["a", "b", "c"]) await itemPlugin(root, dir, `${dir}1`);
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		const host = createHost({ onError: () => {} });
 		await plugins.load(host, { kind: "worker", core: [], modules: HOST_PACKAGES }, context);
 		const label = async (dir: string) =>
@@ -164,7 +178,7 @@ describe("per plugin at reload", () => {
 		await itemPlugin(root, "d", "d1");
 		await writePlugin(root, "e", "@test/e", { "worker.ts": "export default {" });
 		await rm(join(root, "c"), { recursive: true });
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ set: true }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ set: true }), { timeout: EVENT_WAIT });
 		const built = await plugins.build([], context);
 		expect(built.removed).toEqual(["@test/c"]);
 		const report = await plugins.reload(host, built, context);
@@ -192,7 +206,7 @@ describe("per plugin at reload", () => {
 			].join("\n");
 		await writePlugin(root, "provider", "@test/provider", { "worker.ts": provider(1) });
 		await writePlugin(root, "consumer", "@test/consumer", { "worker.ts": consumer(1) });
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		const host = createHost({ onError: () => {} });
 		await plugins.load(host, { kind: "worker", core: [], modules: HOST_PACKAGES }, context);
 		const C = local("test.consumer", { version: 1, params: {}, members: { label: str() } });
@@ -214,7 +228,7 @@ describe("per plugin at reload", () => {
 	});
 });
 
-describe("rollout", () => {
+describe("rollout", { timeout: EVENT_TEST }, () => {
 	/** A step recording its name into `order`, answering `report` for one host (or `hosts`), or rejecting with `error`. */
 	const step = (
 		name: string,
@@ -240,12 +254,14 @@ describe("rollout", () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "a", "a1");
 		await itemPlugin(root, "b", "b1");
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		await plugins.build([], context);
 		await writeFile(join(root, "a", "worker.ts"), "// a\n");
 		await writeFile(join(root, "b", "worker.ts"), "// b\n");
+		// Every event of the writes in before the build: one arriving after it (FSEvents' arrive late) marks again.
+		await fileEventsSettled();
 		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a", "@test/b"] }), {
-			timeout: 5_000,
+			timeout: EVENT_WAIT,
 		});
 		const built = await plugins.build(["@test/a", "@test/b"], context);
 		const order: string[] = [];
@@ -267,10 +283,13 @@ describe("rollout", () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "a", "a1");
 		await itemPlugin(root, "b", "b1");
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		await plugins.build([], context);
 		await writeFile(join(root, "a", "worker.ts"), "// a\n");
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: 5_000 });
+		await fileEventsSettled();
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] }), {
+			timeout: EVENT_WAIT,
+		});
 		const stopped: RolloutHost[] = [{ host: "session|S1", stopped: true }];
 		await plugins.rollout(
 			[step("workers", [], { hosts: stopped })],
@@ -279,7 +298,9 @@ describe("rollout", () => {
 		);
 		expect(plugins.state.value).toMatchObject({ dirty: [] });
 		await writeFile(join(root, "a", "worker.ts"), "// a again\n");
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] }), {
+			timeout: EVENT_WAIT,
+		});
 		const crashed: RolloutHost[] = [
 			{ host: "session|S1", report: report([]) },
 			{ host: "session|S2", error: new Error("crashed") },
@@ -297,10 +318,13 @@ describe("rollout", () => {
 	it("keeps dirty a plugin whose built kind no step shipped", async () => {
 		const root = await tempRoot();
 		await writePlugin(root, "a", "@test/a", { "worker.ts": "export default { setup: () => {} };", "server.ts": "" });
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		await plugins.build([], context);
 		await writeFile(join(root, "a", "worker.ts"), "export default { setup: () => {} }; // edited\n");
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: 5_000 });
+		await fileEventsSettled();
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] }), {
+			timeout: EVENT_WAIT,
+		});
 		const built = await plugins.build(["@test/a"], context);
 		await plugins.rollout([step("worker", [], { report: report([]) })], built, context);
 		expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] });
@@ -316,10 +340,12 @@ describe("rollout", () => {
 	it("stops at a step that rejects, clearing no mark; a change during the build keeps its mark", async () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "a", "a1");
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		await plugins.build([], context);
 		await writeFile(join(root, "a", "worker.ts"), "// 1\n");
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] }), {
+			timeout: EVENT_WAIT,
+		});
 		const built = await plugins.build(["@test/a"], context);
 		const order: string[] = [];
 		const stopped = await plugins.rollout(
@@ -336,20 +362,23 @@ describe("rollout", () => {
 		// Saved again after the build: applied, the mark stays (the build did not include the new content).
 		const later = await plugins.build(["@test/a"], context);
 		await writeFile(join(root, "a", "worker.ts"), "// 2\n");
-		await vi.waitFor(async () => {
-			await plugins.rollout([step("server", [], { report: report([]) })], later, context);
-			expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] });
-		});
+		await vi.waitFor(
+			async () => {
+				await plugins.rollout([step("server", [], { report: report([]) })], later, context);
+				expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] });
+			},
+			{ timeout: EVENT_WAIT },
+		);
 		plugins.close();
 	});
 });
 
-describe("current sets (slice 10 D11)", () => {
+describe("current sets (slice 10 D11)", { timeout: EVENT_TEST }, () => {
 	it("scripts(kind): built on first use; a build changes no set; a rollout applies it right before a step of its kind", async () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "a", "a1");
 		await writePlugin(root, "b", "@test/b", { "server.ts": "export default { setup: () => {} };" });
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		const digests = async () =>
 			(await plugins.scripts("worker", context)).map(({ plugin, built }) => [
 				plugin.name,
@@ -376,7 +405,7 @@ describe("current sets (slice 10 D11)", () => {
 	});
 });
 
-describe("installs through the component", () => {
+describe("installs through the component", { timeout: EVENT_TEST }, () => {
 	it("clears the plugin's install mark and dirties it", async () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "a", "a1");
@@ -392,12 +421,16 @@ describe("installs through the component", () => {
 			},
 			context,
 		);
+		await fileEventsSettled();
 		await plugins.build([], context);
 		await writeFile(
 			join(root, "a", "package.json"),
 			JSON.stringify({ name: "@test/a", type: "module", dependencies: {} }),
 		);
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ install: ["@test/a"] }), { timeout: 5_000 });
+		await fileEventsSettled();
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ install: ["@test/a"] }), {
+			timeout: EVENT_WAIT,
+		});
 		await plugins.installDependencies("@test/a", context);
 		expect(plugins.state.value).toMatchObject({ install: [], dirty: ["@test/a"] });
 		expect(reported).toEqual([]);
@@ -442,11 +475,11 @@ describe("GC", () => {
 	});
 });
 
-describe("end to end: a server and a worker", () => {
+describe("end to end: a server and a worker", { timeout: EVENT_TEST }, () => {
 	it("loads plugin directories, rolls an edit out (server, then worker), and keeps a broken edit old on both", async () => {
 		type P = { readonly kind: "server" } | { readonly kind: "worker" };
 		const root = await tempRoot(["contracts", "notes"]);
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		const [up, down] = memoryLinkPair();
 		const worker = createHost<P>({ address: Worker(), principal: { kind: "worker" }, onError: () => {} });
 		worker.connect(up, { principal: { kind: "server" } }, context);
@@ -466,7 +499,10 @@ describe("end to end: a server and a worker", () => {
 		const steps = [plugins.step("server", server as Host<P>), plugins.step("worker", worker as Host<P>)];
 
 		await writeFile(join(root, "notes", "label.ts"), 'export const label = "v2";\n');
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/notes"] }), { timeout: 5_000 });
+		await fileEventsSettled();
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/notes"] }), {
+			timeout: EVENT_WAIT,
+		});
 		const rolled = await plugins.rollout(steps, await plugins.build(plugins.state.value.dirty, context), context);
 		expect(
 			rolled.steps.map(({ name, hosts }) => [name, reportOf(hosts).plugins.changed, reportOf(hosts).objects]),
@@ -481,7 +517,9 @@ describe("end to end: a server and a worker", () => {
 		expect(plugins.state.value).toMatchObject({ dirty: [] });
 
 		await writeFile(join(root, "notes", "label.ts"), "export const label = ;\n");
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/notes"] }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/notes"] }), {
+			timeout: EVENT_WAIT,
+		});
 		const broken = await plugins.rollout(steps, await plugins.build(plugins.state.value.dirty, context), context);
 		expect(broken.steps.map(({ name, hosts }) => [name, failedNames(reportOf(hosts))])).toEqual([
 			["server", ["@test/notes"]],
@@ -496,12 +534,12 @@ describe("end to end: a server and a worker", () => {
 	});
 });
 
-describe("fix round 1", () => {
+describe("fix round 1", { timeout: EVENT_TEST }, () => {
 	it("serializes reloads of one host: two started together keep both changes (Astra, Sol, Opus S1)", async () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "a", "a1");
 		await itemPlugin(root, "b", "b1");
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		const host = createHost({ onError: () => {} });
 		await plugins.load(host, { kind: "worker", core: [], modules: HOST_PACKAGES }, context);
 		await itemPlugin(root, "a", "a2");
@@ -522,13 +560,13 @@ describe("fix round 1", () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "a", "a1");
 		await itemPlugin(root, "b", "b1");
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		const host = createHost({ onError: () => {} });
 		await plugins.load(host, { kind: "worker", core: [], modules: HOST_PACKAGES }, context);
 		await itemPlugin(root, "a", "a2");
 		const first = await plugins.build(["@test/a"], context);
 		await rm(join(root, "b"), { recursive: true });
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ set: true }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ set: true }), { timeout: EVENT_WAIT });
 		const later = await plugins.build([], context);
 		expect([first.removed, later.removed]).toEqual([[], ["@test/b"]]);
 		const report = await plugins.reload(host, first, context);
@@ -542,7 +580,7 @@ describe("fix round 1", () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "a", "a1");
 		await itemPlugin(root, "b", "b1");
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		const host = createHost({ onError: () => {} });
 		await plugins.load(host, { kind: "worker", core: [], modules: HOST_PACKAGES }, context);
 		const Item = local("test.a", { version: 1, params: {}, members: { label: str() } });
@@ -574,7 +612,7 @@ describe("fix round 1", () => {
 	it("leaves a plugin out of a host whose kind its rebuilt facets no longer have (Opus recheck R1)", async () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "a", "a1");
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		const host = createHost({ onError: () => {} });
 		await plugins.load(host, { kind: "worker", core: [], modules: HOST_PACKAGES }, context);
 		// The plugin keeps a server facet only.
@@ -583,7 +621,7 @@ describe("fix round 1", () => {
 			"server.ts":
 				'import { defineFacet } from "@earendil-works/chord/next";\nexport default defineFacet(() => {});',
 		});
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ set: true }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ set: true }), { timeout: EVENT_WAIT });
 		const built = await plugins.build(["@test/a"], context);
 		expect(built.removed).toEqual([]);
 		expect((await plugins.reload(host, built, context)).plugins).toEqual({
@@ -598,12 +636,14 @@ describe("fix round 1", () => {
 	it("reloads a structured clone of a build as the build itself: it is plain data (Astra)", async () => {
 		const root = await tempRoot();
 		await itemPlugin(root, "a", "a1");
-		const { plugins } = component(root);
+		const { plugins } = await component(root);
 		const host = createHost({ onError: () => {} });
 		await plugins.load(host, { kind: "worker", core: [], modules: HOST_PACKAGES }, context);
 		const item = await host.get(local("test.a", { version: 1, params: {}, members: { label: str() } }), {}, context);
 		await itemPlugin(root, "a", "a2");
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ dirty: ["@test/a"] }), {
+			timeout: EVENT_WAIT,
+		});
 		const built = await plugins.build(["@test/a"], context);
 		expect((await plugins.reload(host, structuredClone(built), context)).plugins.changed).toEqual(["@test/a"]);
 		expect(item.label.value).toBe("a2");
@@ -632,11 +672,14 @@ describe("fix round 1", () => {
 			},
 			context,
 		);
+		await fileEventsSettled();
 		expect((await plugins.build([], context)).facets.map(({ kind }) => kind)).toEqual(["script"]);
 		await writeFiles(dir, {
 			"package.json": JSON.stringify({ name: "@test/a", type: "module", dependencies: { "new-dep": "1.0.0" } }),
 		});
-		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ install: ["@test/a"] }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(plugins.state.value).toMatchObject({ install: ["@test/a"] }), {
+			timeout: EVENT_WAIT,
+		});
 		await writePackage(dir, "new-dep", { "index.js": 'exports.label = "new";' });
 		await writeFiles(dir, { "helper.ts": 'export { label } from "new-dep";' });
 		await plugins.installDependencies("@test/a", context);

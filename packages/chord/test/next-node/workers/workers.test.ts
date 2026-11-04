@@ -13,7 +13,7 @@ import { memoryLinkPair } from "../../../src/next/link/index.ts";
 import type { RolloutHost } from "../../../src/next-node/plugins/index.ts";
 import { expectCollected } from "../../next/support.ts";
 import { Control } from "../fixtures/workers/control.ts";
-import { context, fleet, Notes, Session, type TestPrincipal, until } from "./support.ts";
+import { context, EVENT_TEST, fleet, Notes, Session, type TestPrincipal, until } from "./support.ts";
 
 /** A step's hosts as `[host, what]`. */
 function listed(hosts: readonly RolloutHost[]) {
@@ -280,7 +280,7 @@ describe("close", () => {
 	});
 });
 
-describe("the rollout step (§4)", () => {
+describe("the rollout step (§4)", { timeout: EVENT_TEST }, () => {
 	it("ships the current set to running workers, retries held failed ones, lists each", async () => {
 		const { server, workers, plugins, label } = await fleet();
 		const one = await server.get(Notes, { id: "S1" }, context);
@@ -469,7 +469,7 @@ describe("fix round 2", () => {
 	});
 });
 
-describe("fix round 1", () => {
+describe("fix round 1", { timeout: EVENT_TEST }, () => {
 	it("close during a forked start that never connects returns at once, no failure (Opus F1)", async () => {
 		const { server, workers, behaviours, errors } = await fleet();
 		behaviours.set("S1", { connect: false });

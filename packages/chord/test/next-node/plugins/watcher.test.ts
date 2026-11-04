@@ -11,10 +11,14 @@ import { Batch } from "../../../src/next/state/internal.ts";
 import { type BuiltFacet, discoverPlugins } from "../../../src/next-node/plugins/index.ts";
 import { PluginWatcher } from "../../../src/next-node/plugins/watcher.ts";
 import { changesOf, delivered } from "../../next/support.ts";
-import { KINDS, tempRoot, writeFiles, writePlugin } from "./support.ts";
+import { EVENT_TEST, EVENT_WAIT, fileEventsSettled, KINDS, tempRoot, writeFiles, writePlugin } from "./support.ts";
 
-/** A root with plugins `a` (worker), `b` (server) and the contracts fixture, a base directory, and a watcher of both. */
-async function watched() {
+/**
+ * A root with plugins `a` (worker), `b` (server) and the contracts fixture, a base directory, and a watcher of both.
+ * For a test of real file events (`live`), the watcher is live and has reported what the fixture's writes left before
+ * discovery (FSEvents reports changes made shortly before a watch began): `know` clears the `set` they asked for.
+ */
+async function watched(live = false) {
 	const root = await realpath(await tempRoot(["contracts"]));
 	const base = await realpath(await tempRoot());
 	await writePlugin(root, "a", "@test/a", { "worker.ts": "", "own.ts": "" });
@@ -24,6 +28,7 @@ async function watched() {
 		{ roots: [root], base: [base], kinds: KINDS, failed: (error) => failures.push(error) },
 		new Batch(() => {}, undefined),
 	);
+	if (live) await fileEventsSettled();
 	const discovery = await discoverPlugins([root], { kinds: KINDS }, context);
 	watcher.know(discovery, watcher.discoverySnapshot());
 	const contract = join(root, "contracts", "contract.ts");
@@ -44,7 +49,7 @@ async function watched() {
 	return { root, base, watcher, failures };
 }
 
-describe("the watcher's marks", () => {
+describe("the watcher's marks", { timeout: EVENT_TEST }, () => {
 	it("dirties every plugin whose facets used a changed file, and the plugin whose directory contains it", async () => {
 		const { root, watcher } = await watched();
 		watcher.mark(join(root, "contracts", "contract.ts"));
@@ -109,18 +114,20 @@ describe("the watcher's marks", () => {
 	});
 
 	it("marks from real file events, publishing the marks to a watch", async () => {
-		const { root, watcher } = await watched();
+		const { root, watcher } = await watched(true);
 		const changes = changesOf(await watcher.watch(context));
 		await writeFile(join(root, "a", "node_modules-free.ts"), "export {};");
 		await writeFiles(join(root, "b", "node_modules", "pkg"), { "index.js": "" });
-		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: 5_000 });
+		// Both writes' events have arrived (FSEvents' late): the one under node_modules marked nothing.
+		await fileEventsSettled();
+		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: EVENT_WAIT });
 		await delivered();
 		expect(changes.at(-1)).toMatchObject({ kind: "value", value: { dirty: ["@test/a"] } });
 		watcher.close();
 	});
 });
 
-describe("the watcher, fix round 1", () => {
+describe("the watcher, fix round 1", { timeout: EVENT_TEST }, () => {
 	it("never lets an older build's applied snapshot clear a newer edit's mark (Astra)", async () => {
 		const { root, watcher } = await watched();
 		const file = join(root, "a", "own.ts");
@@ -167,21 +174,21 @@ describe("the watcher, fix round 1", () => {
 	);
 
 	it("watches a directory that appears later, and marks the files in it", async () => {
-		const { root, watcher } = await watched();
+		const { root, watcher } = await watched(true);
 		await writeFiles(join(root, "a", "lib"), { "first.ts": "" });
-		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: EVENT_WAIT });
 		watcher.applied(["@test/a"], watcher.snapshot(["@test/a"]));
 		await writeFile(join(root, "a", "lib", "second.ts"), "export {};");
-		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: EVENT_WAIT });
 		watcher.close();
 	});
 });
 
-describe("the watcher and links", () => {
+describe("the watcher and links", { timeout: EVENT_TEST }, () => {
 	it("survives a link loop created under a root (its stat never escapes the callback) and still marks it (Sol)", async () => {
-		const { root, watcher } = await watched();
+		const { root, watcher } = await watched(true);
 		await symlink("loop", join(root, "a", "loop"));
-		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: 5_000 });
+		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: EVENT_WAIT });
 		watcher.close();
 	});
 });
