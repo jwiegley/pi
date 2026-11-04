@@ -54,14 +54,14 @@ export type WatcherOptions = {
 	readonly failed: (error: unknown) => void;
 };
 
-/** Directories never watched, and changes under them never marked. */
+/** Directories never watched (on macOS a tree's recursive watch covers them), and changes under them never marked. */
 const IGNORED = new Set(["node_modules", ".git"]);
 
 /**
  * Whether a tree is watched by one recursive watch rather than a watch per directory: on macOS. libuv serves an event
  * loop's watches there from one FSEvents stream that it stops and starts anew for every watch added or closed, so a
- * watch per directory lost the changes made in any tree while a directory came or went (a file written into a new
- * directory right after its watch was added, among them); FSEvents watches a whole tree anyway.
+ * watch per directory could lose the changes made in any tree while a directory came or went (a file written into a
+ * new directory right after its watch was added, among them); FSEvents watches a whole tree anyway.
  */
 const RECURSIVE = process.platform === "darwin";
 
@@ -105,7 +105,7 @@ export class PluginWatcher extends Source {
 	#closed = false;
 	/** The trees it watches: the roots, the base code, and plugin directories linked from outside the roots. */
 	readonly #trees = new Set<string>();
-	/** Its watches, one per directory of its trees. */
+	/** Its watches: one per directory of its trees, on macOS one per tree. */
 	readonly #watchers = new Map<string, FSWatcher>();
 	/** A failure to watch was reported (once). */
 	#reported = false;
