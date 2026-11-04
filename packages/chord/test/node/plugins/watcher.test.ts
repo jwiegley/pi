@@ -227,11 +227,23 @@ describe("the watcher, fix round 1", { timeout: EVENT_TEST }, () => {
 
 	it("watches a directory that appears later, and marks the files in it", async () => {
 		const { root, watcher } = await watched(true);
+		const mark = vi.spyOn(watcher, "mark");
+		const watches = () => process.getActiveResourcesInfo().filter((type) => type === "FSEventWrap").length;
+		const before = watches();
 		await writeFiles(join(root, "a", "lib"), { "first.ts": "" });
-		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: EVENT_WAIT });
+		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), {
+			timeout: EVENT_WAIT,
+			interval: 1,
+		});
+		// A watch of its own, except on macOS: there a watch added restarts libuv's FSEvents stream, losing what changes
+		// meanwhile, and the tree's one recursive watch covers the new directory.
+		expect(watches() - before).toBe(process.platform === "darwin" ? 0 : 1);
 		watcher.applied(["@test/a"], watcher.snapshot(["@test/a"]));
-		await writeFile(join(root, "a", "lib", "second.ts"), "export {};");
-		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: EVENT_WAIT });
+		// Written at once: on macOS a watch per directory lost it while the new directory's watch was being added.
+		const second = join(root, "a", "lib", "second.ts");
+		await writeFile(second, "export {};");
+		await vi.waitFor(() => expect(mark).toHaveBeenCalledWith(second), { timeout: EVENT_WAIT });
+		expect(watcher.value).toMatchObject({ dirty: ["@test/a"] });
 		watcher.close();
 	});
 });

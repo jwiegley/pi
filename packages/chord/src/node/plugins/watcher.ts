@@ -1,14 +1,15 @@
 // The watcher and its marks (slice 7c §5, slice 12 §4): `fs.watch` on every directory of the plugin roots and the app's
-// base code, `node_modules` and `.git` never watched (a directory appearing later gets its watch), marks what changed and
-// never applies it. A changed file dirties every plugin whose facets used it (a copied contract every user), whose
-// directory contains it or which is a single-file plugin of it; a changed `package.json` asks for an install (and for
-// its metadata to be read again); a plugin directory, a facet file or a single-file plugin's file added or removed asks
-// for discovery again. Base code is compared, not latched: `base` (the app restarts its hosts) is true exactly while a
-// file differs from what a running base artifact read (its bytes' hash: the server's own code hashed at start, each
-// base bundle's record), is gone, or is a source file new in a base directory; checked once when its watch starts and
-// again at each event, the reads of one path in order. The marks are a JSON watchable; each plugin mark records the
-// generation of its latest change (generations only increase), so a change during a build keeps its mark, however
-// late an older build's rollout clears.
+// base code, `node_modules` and `.git` never watched (a directory appearing later gets its watch; on macOS one
+// recursive watch per tree, which sees them too, and changes under them are never marked), marks what changed and never
+// applies it. A changed file dirties every plugin whose facets used it (a copied contract every user), whose directory
+// contains it or which is a single-file plugin of it; a changed `package.json` asks for an install (and for its
+// metadata to be read again); a plugin directory, a facet file or a single-file plugin's file added or removed asks for
+// discovery again. Base code is compared, not latched: `base` (the app restarts its hosts) is true exactly while a file
+// differs from what a running base artifact read (its bytes' hash: the server's own code hashed at start, each base
+// bundle's record), is gone, or is a source file new in a base directory; checked once when its watch starts and again
+// at each event, the reads of one path in order. The marks are a JSON watchable; each plugin mark records the
+// generation of its latest change (generations only increase), so a change during a build keeps its mark, however late
+// an older build's rollout clears.
 
 import {
 	type Dirent,
@@ -55,6 +56,14 @@ export type WatcherOptions = {
 
 /** Directories never watched, and changes under them never marked. */
 const IGNORED = new Set(["node_modules", ".git"]);
+
+/**
+ * Whether a tree is watched by one recursive watch rather than a watch per directory: on macOS. libuv serves an event
+ * loop's watches there from one FSEvents stream that it stops and starts anew for every watch added or closed, so a
+ * watch per directory lost the changes made in any tree while a directory came or went (a file written into a new
+ * directory right after its watch was added, among them); FSEvents watches a whole tree anyway.
+ */
+const RECURSIVE = process.platform === "darwin";
 
 /** The files of a base directory that are code: one added there marks `base` (a swap file or a note does not). */
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json", ".css"]);
@@ -463,7 +472,10 @@ export class PluginWatcher extends Source {
 		this.#compareAt(path);
 	}
 
-	/** Watches the tree at `dir` (once): it and every directory under it but ignored ones; a missing one is skipped. */
+	/**
+	 * Watches the tree at `dir` (once): it and every directory under it but ignored ones, on macOS in one recursive watch;
+	 * a missing one is skipped.
+	 */
 	#watchTree(dir: string): void {
 		if (this.#trees.has(dir)) return;
 		this.#trees.add(dir);
@@ -476,12 +488,15 @@ export class PluginWatcher extends Source {
 		this.#unwatchDirs(dir);
 	}
 
-	/** Watches `dir` and, walking down, every directory under it but ignored ones (each not watched yet). */
+	/**
+	 * Watches `dir` and, walking down, every directory under it but ignored ones (each not watched yet); on macOS `dir`
+	 * alone, recursively.
+	 */
 	#watchDirs(dir: string): void {
 		if (this.#watchers.has(dir) || this.#reported) return;
 		let watcher: FSWatcher;
 		try {
-			watcher = watch(dir, (_event, file) => {
+			watcher = watch(dir, { recursive: RECURSIVE }, (_event, file) => {
 				if (file !== null) this.#changedIn(join(dir, file));
 			});
 		} catch (error) {
@@ -491,6 +506,7 @@ export class PluginWatcher extends Source {
 		watcher.on("error", (error) => this.#failed(error));
 		this.#watchers.set(dir, watcher);
 		this.#identities.set(dir, identityOf(dir));
+		if (RECURSIVE) return;
 		let entries: Dirent[];
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });
@@ -506,11 +522,11 @@ export class PluginWatcher extends Source {
 	/**
 	 * An event for `path` in a watched directory: a directory gets its watches (renewed when it is another directory than
 	 * the one watched: removed and made again, its old watches dead, its inode possibly reused), a removed one loses
-	 * them; marked.
+	 * them (a recursive watch covers both); marked.
 	 */
 	#changedIn(path: string): void {
 		const name = basename(path);
-		if (!IGNORED.has(name)) {
+		if (!RECURSIVE && !IGNORED.has(name)) {
 			if (isDirectory(path)) {
 				if (this.#watchers.has(path) && this.#replaced(path)) this.#unwatchDirs(path);
 				this.#watchDirs(path);

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed `apply()`, `applyImmutable()`, and `applyImmutableBatches()` passing the items of a large splice as spread call arguments, up to 10,000 per call, and moving the array tail again for every 10,000 items; they now grow the array once, move its tail once with `copyWithin`, and assign the items in place.
+- Fixed Chord v2's plugin watcher on macOS losing changes: it watched every directory with its own `fs.watch`, and libuv restarts its one FSEvents stream for every watch added or closed, dropping the changes made meanwhile in every watched tree. It now watches each tree with one recursive watch there; changes under `node_modules` and `.git` are still never marked.
 
 ## [1.5.2] - 2026-11-10
 
