@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Input } from "../src/components/input.ts";
+import { FAKE_CURSOR_END, FAKE_CURSOR_START } from "../src/tui.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 
 describe("Input component", () => {
@@ -97,6 +98,73 @@ describe("Input component", () => {
 			const [line] = input.render(width);
 			assert.ok(line);
 			assert.ok(visibleWidth(line) <= width);
+		});
+	});
+
+	describe("mask", () => {
+		const shown = (input: Input, width = 40) => stripTerminalSequences(input.render(width)[0] ?? "").trimEnd();
+
+		it("draws the mask for each typed and pasted grapheme and keeps the value", () => {
+			const input = new Input({ mask: "*" });
+			input.handleInput("sk-a");
+			assert.strictEqual(shown(input), "> ****");
+			input.handleInput("\x1b[200~日本$x\x1b[201~");
+			assert.strictEqual(shown(input), "> ********");
+			assert.strictEqual(input.getValue(), "sk-a日本$x");
+		});
+
+		it("draws the cursor on the mask of the grapheme it is on", () => {
+			const input = new Input({ mask: "*" });
+			input.handleInput("ab日c");
+			input.handleInput("\x01");
+			input.handleInput("\x1b[C");
+			input.handleInput("\x1b[C");
+			const [line] = input.render(40);
+			assert.ok(line?.startsWith(`> **${FAKE_CURSOR_START}*${FAKE_CURSOR_END}*`), JSON.stringify(line));
+		});
+
+		it("scrolls a long value without drawing any of it", () => {
+			const input = new Input({ mask: "*" });
+			const value = "sk-or-v1-0123456789abcdef0123456789abcdef";
+			input.handleInput(value);
+			const [line] = input.render(12);
+			assert.ok(line);
+			assert.ok(visibleWidth(line) <= 12);
+			assert.match(stripTerminalSequences(line), /^> \*+ *$/);
+		});
+
+		it("moves and deletes by word across the whole value, so separators stay hidden", () => {
+			const input = new Input({ mask: "*" });
+			input.handleInput("sk-or-v1-abc");
+			input.handleInput("\x1bb"); // Alt+B (word left)
+			input.handleInput("X");
+			assert.strictEqual(input.getValue(), "Xsk-or-v1-abc");
+			input.handleInput("\x1bf"); // Alt+F (word right)
+			input.handleInput("Y");
+			assert.strictEqual(input.getValue(), "Xsk-or-v1-abcY");
+			input.handleInput("\x17"); // Ctrl+W (delete word backward)
+			assert.strictEqual(input.getValue(), "");
+		});
+
+		it("moves the cursor by the mask's columns on a mouse press", () => {
+			const input = new Input({ mask: "*" });
+			input.setValue("日本語");
+			input.render(20);
+			input.handleMouse({
+				type: "press",
+				button: "left",
+				x: 3,
+				y: 0,
+				screenX: 3,
+				screenY: 0,
+				width: 20,
+				height: 1,
+				shift: false,
+				alt: false,
+				ctrl: false,
+			});
+			input.handleInput("X");
+			assert.strictEqual(input.getValue(), "日X本語");
 		});
 	});
 
