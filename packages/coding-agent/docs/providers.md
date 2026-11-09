@@ -83,6 +83,8 @@ To use a secret manager without writing the resolved key to disk, set a provider
 
 Pi runs the command when the key is first needed and caches its standard output for the process lifetime. Empty output, a timeout, or a nonzero exit leaves the key unresolved until Pi restarts.
 
+A stored `key` can also name environment variables as `$NAME` or `${NAME}`; write `$$` for a literal `$` and `$!` for a literal `!`. `/login` and `pi auth login --api-key` store the key you enter escaped this way, so it is never expanded or run as a command.
+
 ## Provider Specific Config
 
 The providers below have additional setup, need additional settings, or can use credentials supplied by their platform.

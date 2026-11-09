@@ -308,7 +308,7 @@ export PI_SELF_UPDATE_COMMAND="mise use -g npm:{packageName}@{version}"
 
 | Option | Description |
 |---|---|
-| `--api-key` | Save an API key instead of signing in with an account; the key is read without echoing it |
+| `--api-key` | Save an API key instead of signing in with an account; the key is read without echoing it and stored as entered, never expanded or run |
 | `--no-browser` | Do not open a browser; use the provider's other sign-in method, such as a device code, for example over SSH. Asks when there are several. Not allowed with `--api-key` |
 
 `pi auth logout <provider>` removes the credentials that `pi auth login` or `/login` stored, like `/logout`. Environment variables and `models.json` config are unchanged. It exits with status `0` when nothing is stored, so it is safe to repeat.
