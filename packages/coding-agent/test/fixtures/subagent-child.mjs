@@ -30,8 +30,8 @@ const assistant = (text, options = {}) => ({
 	timestamp: Date.now(),
 });
 
-const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
-const emitMessage = (message) => emit({ type: "message_end", message });
+const emit = (event, written) => process.stdout.write(`${JSON.stringify(event)}\n`, written);
+const emitMessage = (message, written) => emit({ type: "message_end", message }, written);
 
 if (task.startsWith("record-argv:")) {
 	fs.writeFileSync(task.slice("record-argv:".length), JSON.stringify(process.argv));
@@ -67,9 +67,12 @@ if (task.startsWith("record-argv:")) {
 } else if (task.startsWith("large")) {
 	emitMessage(assistant(`${"x".repeat(60 * 1024)}\n${"line\n".repeat(2100)}`));
 } else if (task.startsWith("ignore-sigterm:")) {
-	fs.writeFileSync(task.slice("ignore-sigterm:".length), String(process.pid));
+	// The pid file says the child is ready: it ignores SIGTERM and its partial message is in the pipe. The test aborts
+	// as soon as the file appears, and its fake timers send SIGKILL right after SIGTERM.
 	process.on("SIGTERM", () => {});
-	emitMessage(assistant("partial", { stopReason: "toolUse" }));
+	emitMessage(assistant("partial", { stopReason: "toolUse" }), () =>
+		fs.writeFileSync(task.slice("ignore-sigterm:".length), String(process.pid)),
+	);
 	setInterval(() => {}, 1000);
 } else if (task.startsWith("hold:")) {
 	fs.appendFileSync(task.slice("hold:".length), `${process.pid}\n`);
