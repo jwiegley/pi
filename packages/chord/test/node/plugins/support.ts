@@ -4,7 +4,7 @@
 
 import { execFileSync } from "node:child_process";
 import { type FSWatcher, watch } from "node:fs";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, link, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +43,20 @@ export async function tempRoot(fixtures: readonly string[] = []): Promise<string
 	made.push(root);
 	for (const name of fixtures) await cp(join(FIXTURES, name), join(root, name), { recursive: true });
 	return root;
+}
+
+/**
+ * Makes a pipe at `path` that holds a read until it is written, and returns a hard link to it in a directory of its
+ * own: the test writes the pipe through the link. Linux before 6.18 reports a write to a pipe as a modification in the
+ * directory it was opened through (6.18's "fsnotify: do not generate ACCESS/MODIFY events on child for special files"
+ * stopped that), and a watcher of `path`'s directory would compare the pipe again: one more reader, waiting for a write
+ * that never comes. Call it before anything watches that directory: the link is an attribute change of the pipe.
+ */
+export async function heldPipe(path: string): Promise<string> {
+	execFileSync("mkfifo", [path]);
+	const feed = join(await tempRoot(), "feed");
+	await link(path, feed);
+	return feed;
 }
 
 /** How long a test waits for a file system event: FSEvents (macOS) delivers late, by seconds on a busy machine. */

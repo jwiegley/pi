@@ -3,7 +3,6 @@
 // keeping its mark, `node_modules` and `.git` ignored, real file events, the marks as a JSON watchable, and single-file
 // plugins' files.
 
-import { execFileSync } from "node:child_process";
 import { closeSync, constants, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { chmod, mkdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -14,7 +13,16 @@ import { type BuiltFacet, discoverPlugins } from "../../../src/node/plugins/inde
 import { PluginWatcher } from "../../../src/node/plugins/watcher.ts";
 import { Batch } from "../../../src/state/internal.ts";
 import { changesOf, delivered } from "../../support.ts";
-import { EVENT_TEST, EVENT_WAIT, KINDS, settleFileEvents, tempRoot, writeFiles, writePlugin } from "./support.ts";
+import {
+	EVENT_TEST,
+	EVENT_WAIT,
+	heldPipe,
+	KINDS,
+	settleFileEvents,
+	tempRoot,
+	writeFiles,
+	writePlugin,
+} from "./support.ts";
 
 /**
  * A root with plugins `a` (worker), `b` (server) and the contracts fixture, a base directory, and a watcher of both.
@@ -405,16 +413,16 @@ describe("base code compared with what the running bases read (p3 step 0a)", { t
 			const { watcher } = await based({});
 			const root = await realpath(await tempRoot());
 			const pipe = join(root, "held.ts");
-			execFileSync("mkfifo", [pipe]);
+			const feed = await heldPipe(pipe);
 			// The first comparison opens the pipe and waits for a writer; a second one is queued behind it.
 			watcher.recordBase(new Map([[pipe, hashOf("as built")]]));
 			watcher.mark(pipe);
 			await settled();
 			// The first read gets other bytes: marked. (Two readers at once would split this: one of them gets nothing.)
-			await writeWhenRead(pipe, "other bytes");
+			await writeWhenRead(feed, "other bytes");
 			await baseIs(watcher, true);
 			// Only now does the second read open the pipe, and it decides: the recorded bytes.
-			await writeWhenRead(pipe, "as built");
+			await writeWhenRead(feed, "as built");
 			await baseIs(watcher, false);
 			watcher.close();
 		},
@@ -428,9 +436,9 @@ describe("base code compared with what the running bases read (p3 step 0a)", { t
 			const root = await realpath(await tempRoot());
 			await mkdir(join(root, "ancestor", "dir"), { recursive: true });
 			const pipe = join(root, "ancestor", "dir", "held.ts");
-			execFileSync("mkfifo", [pipe]);
+			const feed = await heldPipe(pipe);
 			watcher.recordBase(new Map([[pipe, hashOf("as built")]]));
-			await writeWhenRead(pipe, "as built");
+			await writeWhenRead(feed, "as built");
 			await settled();
 			expect(watcher.value).toMatchObject({ base: false });
 			for (let round = 0; round < 20; round++) {
@@ -443,7 +451,7 @@ describe("base code compared with what the running bases read (p3 step 0a)", { t
 			await rename(join(root, "ancestor"), join(root, "moved"));
 			await baseIs(watcher, true);
 			await rename(join(root, "moved"), join(root, "ancestor"));
-			await writeWhenRead(pipe, "as built");
+			await writeWhenRead(feed, "as built");
 			await baseIs(watcher, false);
 			watcher.close();
 		},
@@ -476,8 +484,8 @@ function readerWaits(path: string): boolean {
 }
 
 /**
- * Writes `text` into the pipe at `path` once a reader has it open (a non-blocking open for writing fails until then),
- * and closes it: that reader reads `text`.
+ * Writes `text` into the pipe at `path` (the link `heldPipe` returned) once a reader has it open (a non-blocking open
+ * for writing fails until then), and closes it: that reader reads `text`.
  */
 async function writeWhenRead(path: string, text: string): Promise<void> {
 	for (let tries = 0; ; tries++) {
