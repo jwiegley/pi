@@ -63,12 +63,16 @@ function tierScore(tier: number, score = 0): number {
 	return tier * TIER_WEIGHT + score;
 }
 
-/** Exact (case-insensitive) text match. Messages and ids are only matched exactly: scattered matches in them are noise. */
+/**
+ * Exact (case-insensitive) text match. Messages and ids are only matched exactly: scattered matches in them are noise.
+ * The listing's first-message preview is searched too.
+ */
 function matchLiteralToken(session: SessionInfo, value: string): number | undefined {
 	const name = session.name?.toLowerCase() ?? "";
 	if (name.includes(value)) return tierScore(TIER_NAME, fuzzyMatch(value, name).score);
 	if (session.id.toLowerCase().includes(value)) return tierScore(TIER_TEXT);
 	if (getMessageText(session).lower.includes(value)) return tierScore(TIER_TEXT);
+	if (session.firstMessage.toLowerCase().includes(value)) return tierScore(TIER_TEXT);
 	if (session.cwd.toLowerCase().includes(value)) return tierScore(TIER_TEXT);
 	return undefined;
 }
@@ -90,13 +94,19 @@ function matchPhraseToken(session: SessionInfo, phrase: string): number | undefi
 	if (name.includes(phrase)) return tierScore(TIER_NAME, fuzzyMatch(phrase, name).score);
 	if (session.id.toLowerCase().includes(phrase)) return tierScore(TIER_TEXT);
 	if (getNormalizedMessageText(session).includes(phrase)) return tierScore(TIER_TEXT);
+	if (normalizeWhitespaceLower(session.firstMessage).includes(phrase)) return tierScore(TIER_TEXT);
 	if (normalizeWhitespaceLower(session.cwd).includes(phrase)) return tierScore(TIER_TEXT);
 	return undefined;
 }
 
 function matchRegex(session: SessionInfo, regex: RegExp): number | undefined {
 	if (session.name && regex.test(session.name)) return tierScore(TIER_NAME);
-	if (regex.test(session.id) || regex.test(session.allMessagesText) || regex.test(session.cwd)) {
+	if (
+		regex.test(session.id) ||
+		regex.test(session.allMessagesText) ||
+		regex.test(session.cwd) ||
+		regex.test(session.firstMessage)
+	) {
 		return tierScore(TIER_TEXT);
 	}
 	return undefined;

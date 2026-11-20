@@ -64,6 +64,26 @@ function createSession(options: {
 		});
 	}
 
+	const getHistorySummary = () => {
+		const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		let latestCacheHitRate: number | undefined;
+		for (const entry of entries) {
+			const message = entry.message as { role: string; usage?: AssistantUsage } | undefined;
+			const entryUsage = message ? message.usage : (entry.usage as AssistantUsage | undefined);
+			if (!entryUsage) continue;
+			usageTotals.input += entryUsage.input;
+			usageTotals.output += entryUsage.output;
+			usageTotals.cacheRead += entryUsage.cacheRead;
+			usageTotals.cacheWrite += entryUsage.cacheWrite;
+			usageTotals.cost += entryUsage.cost.total;
+			if (message?.role === "assistant") {
+				const promptTokens = entryUsage.input + entryUsage.cacheRead + entryUsage.cacheWrite;
+				latestCacheHitRate = promptTokens > 0 ? (entryUsage.cacheRead / promptTokens) * 100 : undefined;
+			}
+		}
+		return { usage: usageTotals, latestCacheHitRate };
+	};
+
 	const session = {
 		state: {
 			model: {
@@ -79,6 +99,7 @@ function createSession(options: {
 			getEntryCount: () => entries.length,
 			getSessionId: () => "test-session",
 			getLeafId: () => null,
+			getHistorySummary,
 			getSessionName: () => options.sessionName,
 			getCwd: () => "/tmp/project",
 		},
@@ -131,6 +152,30 @@ describe("FooterComponent width handling", () => {
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
+	});
+
+	it("renders nothing while detached", () => {
+		const footer = new FooterComponent(createSession({ sessionName: "old" }), createFooterData(1));
+		footer.detachSession();
+
+		expect(footer.render(80)).toEqual([]);
+	});
+
+	it("uses one captured session for an entire render", () => {
+		const replacement = createSession({ sessionName: "replacement", modelId: "replacement-model" });
+		const original = createSession({ sessionName: "original", modelId: "original-model" });
+		const footer = new FooterComponent(original, createFooterData(1));
+		const originalManager = original.sessionManager as unknown as { getHistorySummary: () => unknown };
+		const getHistorySummary = originalManager.getHistorySummary;
+		originalManager.getHistorySummary = () => {
+			footer.bindSession(replacement);
+			return getHistorySummary();
+		};
+
+		const lines = footer.render(120).map(stripAnsi);
+		expect(lines[0]).toContain("original");
+		expect(lines[1]).toContain("original-model");
+		expect(lines.join("\n")).not.toContain("replacement");
 	});
 
 	it("keeps stats line within width for wide model and provider names", () => {

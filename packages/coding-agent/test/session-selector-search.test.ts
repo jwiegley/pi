@@ -14,7 +14,9 @@ function makeSession(
 		modified: overrides.modified,
 		messageCount: overrides.messageCount ?? 1,
 		firstMessage: overrides.firstMessage ?? "(no messages)",
+		firstMessageTruncated: overrides.firstMessageTruncated ?? false,
 		allMessagesText: overrides.allMessagesText,
+		allMessagesTextTruncated: overrides.allMessagesTextTruncated ?? false,
 	};
 }
 

@@ -568,7 +568,7 @@ Response:
 
 ### export_html
 
-Export session to an HTML file.
+Export session to an HTML file. The output path must not already exist; export publishes without clobbering files, links, or concurrent writers.
 
 ```json
 {"type": "export_html"}
@@ -665,7 +665,7 @@ If an extension canceled the clone:
 
 ### get_fork_messages
 
-Get user messages available for forking.
+Get every user message available for forking, including complete text. This legacy command accepts no paging options and can produce a large response. New clients use `get_fork_messages_page`.
 
 ```json
 {"type": "get_fork_messages"}
@@ -686,12 +686,25 @@ Response:
 }
 ```
 
-### get_entries
+### get_fork_messages_page
 
-Get all session entries in append order (excluding the session header). The session is an append-only tree of entries with stable ids, so an entry id works as a durable cursor: pass the last entry id you have seen as `since` to get only entries strictly after it, even across client restarts. Unlike `get_messages`, this includes pre-compaction history and abandoned branches.
+Return a bounded page of user-message previews for forking:
 
 ```json
-{"type": "get_entries"}
+{"type":"get_fork_messages_page","direction":"reverse","limit":128}
+{"type":"response","command":"get_fork_messages_page","success":true,"data":{"messages":[{"entryId":"abc123","text":"Prompt preview...","textTruncated":true}],"nextOrdinal":42}}
+```
+
+Text previews are capped at 4 KiB; `textTruncated` marks shortened text. Forking still uses the complete persisted payload.
+
+`direction` defaults to `forward`. `limit` defaults to 256 and is capped at 4096. Forward pages use exclusive `afterOrdinal`; reverse pages use exclusive `beforeOrdinal`. These cursors cannot be combined. Pages remain chronological in either direction. Feed `nextOrdinal` back using the matching cursor; `null` means no records remain. Cursors must be non-negative safe integers and `limit` must be a positive safe integer. Invalid values or combinations return an error.
+
+### get_entries
+
+Get session entries in append order, excluding the header and including pre-compaction history and abandoned branches. Prefer bounded ordinal pages. The legacy no-option and `since` forms can materialize complete remaining history.
+
+```json
+{"type": "get_entries", "afterOrdinal": 127, "limit": 256}
 ```
 
 With a cursor:
@@ -709,16 +722,17 @@ Response:
     "entries": [
       {"type": "message", "id": "def456", "parentId": "abc123", "timestamp": "...", "message": {"role": "user", "...": "..."}}
     ],
+    "nextOrdinal": 383,
     "leafId": "def456"
   }
 }
 ```
 
-`leafId` is the id of the current leaf entry (`null` for an empty session), so a client can tell in one round trip whether the active branch moved. If `since` does not match any entry id, the response is `success: false`.
+`nextOrdinal`, when present, is the exclusive `afterOrdinal` cursor for the next page. `leafId` is the current leaf entry ID (`null` for an empty session), so clients can detect branch movement. If `since` does not match an entry ID, the response is `success: false`.
 
 ### get_tree
 
-Get the session as a tree of entries. Each node is `{entry, children, label?, labelTimestamp?}`. The result is an array because navigation APIs can create multiple roots; orphaned entries with broken parent chains also appear as roots.
+Get the complete recursive session tree, including entry payloads. Each node is `{entry, children, label?, labelTimestamp?}`. The result is an array because navigation can create multiple roots; orphaned entries also appear as roots. This legacy command accepts no paging options. New clients use `get_tree_page`.
 
 ```json
 {"type": "get_tree"}
@@ -743,6 +757,17 @@ Response:
   }
 }
 ```
+
+### get_tree_page
+
+Return a bounded flat page of tree metadata, not recursive nodes or entry payloads:
+
+```json
+{"type":"get_tree_page","direction":"reverse","limit":128}
+{"type":"response","command":"get_tree_page","success":true,"data":{"entries":[{"ordinal":41,"messageOrdinal":20,"id":"abc123","parentId":null,"type":"message","messageRole":"user","timestamp":"...","label":"checkpoint","labelTimestamp":"..."}],"nextOrdinal":41,"leafId":"def456"}}
+```
+
+Paging and ordering match `get_fork_messages_page`. Reconstruct edges using `id` and `parentId`; parents and the current `leafId` may lie outside the returned page. Use `get_entries` or a targeted API to fetch payloads.
 
 ### get_last_assistant_text
 

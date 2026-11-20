@@ -9,12 +9,18 @@ import {
 	InMemoryModelsStore,
 	type Model,
 } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import { getBranchSelection, type ModelRouteRequest, type VirtualModelDefinition } from "../src/core/virtual-models.ts";
+import {
+	getBranchSelection,
+	getVirtualModelState,
+	type ModelRouteRequest,
+	VIRTUAL_MODEL_STATE_ENTRY,
+	type VirtualModelDefinition,
+} from "../src/core/virtual-models.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 async function createRuntime(requests: ModelRouteRequest[] = []) {
@@ -56,7 +62,7 @@ describe("getBranchSelection", () => {
 		const sessionManager = SessionManager.inMemory();
 		build(sessionManager);
 		const lookups: string[] = [];
-		const selection = getBranchSelection(sessionManager.getBranch(), (provider, modelId) => {
+		const selection = getBranchSelection(sessionManager, (provider, modelId) => {
 			lookups.push(`${provider}/${modelId}`);
 			return runtime.getModel(provider, modelId);
 		});
@@ -97,6 +103,43 @@ describe("getBranchSelection", () => {
 		expect(selection).toEqual({ provider: "faux", modelId: "small" });
 		expect(lookups).toEqual([]);
 	});
+
+	it.each(["physical", "virtual"] as const)(
+		"restores a persisted %s selection without a response or hydration",
+		async (kind) => {
+			const { runtime, virtual } = await createRuntime();
+			const small = runtime.getModel("faux", "small")!;
+			const selected = kind === "virtual" ? virtual : small;
+			const dir = mkdtempSync(join(tmpdir(), "pi-selection-"));
+			const manager = SessionManager.create(dir, dir);
+			let reopened: SessionManager | undefined;
+			try {
+				manager.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+				manager.appendMessage(assistantFrom(small, "ok"));
+				manager.appendModelChange(selected.provider, selected.id);
+				const file = manager.getSessionFile()!;
+				manager.close();
+				reopened = SessionManager.open(file, dir);
+				const getBranch = vi.spyOn(reopened, "getBranch").mockImplementation(() => {
+					throw new Error("full branch hydration");
+				});
+				const getEntries = vi.spyOn(reopened, "getEntries").mockImplementation(() => {
+					throw new Error("full history hydration");
+				});
+				const lookup = vi.fn(() => {
+					throw new Error("unnecessary catalog lookup");
+				});
+				expect(getBranchSelection(reopened, lookup)).toEqual({ provider: selected.provider, modelId: selected.id });
+				expect(lookup).not.toHaveBeenCalled();
+				expect(getBranch).not.toHaveBeenCalled();
+				expect(getEntries).not.toHaveBeenCalled();
+			} finally {
+				reopened?.close();
+				manager.close();
+				rmSync(dir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("uses the latest physical response without a model_change", async () => {
 		const { runtime, virtual } = await createRuntime();
@@ -439,5 +482,42 @@ describe("createAgentSession with virtual models", () => {
 
 		await session.prompt("again");
 		expect(lastModelChange()).toMatchObject({ provider: "faux", modelId: "small" });
+	});
+});
+
+describe("virtual model branch reads on indexed history", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-virtual-indexed-"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("reads the selection and router state without hydrating the branch", async () => {
+		const { runtime } = await createRuntime();
+		const getModel = (provider: string, modelId: string) => runtime.getModel(provider, modelId);
+		const sessionManager = SessionManager.create(tempDir, tempDir);
+		sessionManager.appendModelChange("faux", "small");
+		sessionManager.appendMessage({ role: "user", content: "hi", timestamp: 1 });
+		sessionManager.appendMessage(assistantFrom(runtime.getModel("faux", "large")!, "hello"));
+		const getBranch = vi.spyOn(sessionManager, "getBranch");
+
+		// A physical model_change yields to the physical response after it.
+		expect(getBranchSelection(sessionManager, getModel)).toEqual({ provider: "faux", modelId: "large" });
+
+		// A virtual model_change holds over the physical responses it routed to.
+		sessionManager.appendModelChange("router", "auto");
+		sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, { provider: "router", modelId: "auto", state: 1 });
+		sessionManager.appendMessage(assistantFrom(runtime.getModel("faux", "small")!, "routed"));
+		sessionManager.appendCustomEntry(VIRTUAL_MODEL_STATE_ENTRY, { provider: "router", modelId: "other", state: 2 });
+		expect(getBranchSelection(sessionManager, getModel)).toEqual({ provider: "router", modelId: "auto" });
+		expect(getVirtualModelState(sessionManager, "router", "auto")).toBe(1);
+
+		// An unregistered virtual model does not hold, so the last physical response wins.
+		expect(getBranchSelection(sessionManager, () => undefined)).toEqual({ provider: "faux", modelId: "small" });
+		expect(getBranch).not.toHaveBeenCalled();
 	});
 });

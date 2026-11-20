@@ -51,6 +51,8 @@ describe("shareSession", () => {
 				sessionManager: {
 					getSessionId: () => name,
 					getCwd: () => "/tmp",
+					getSessionFile: () => undefined,
+					iterateBranchEntries() {},
 					getBranch: () => [],
 				},
 				state: { systemPrompt: name, tools: [] },
@@ -109,7 +111,13 @@ describe("shareSession", () => {
 
 		await shareSession({
 			session: {
-				sessionManager: { getSessionId: () => "gist", getCwd: () => "/tmp", getBranch: () => [] },
+				sessionManager: {
+					getSessionId: () => "gist",
+					getCwd: () => "/tmp",
+					getSessionFile: () => undefined,
+					iterateBranchEntries() {},
+					getBranch: () => [],
+				},
 				state: { systemPrompt: "", tools: [] },
 				settingsManager: { getSessionShareDestination: () => "gist" },
 				modelRuntime: { getProvider },
@@ -137,7 +145,13 @@ describe("shareSession", () => {
 
 		await shareSession({
 			session: {
-				sessionManager: { getSessionId: () => "radius", getCwd: () => "/tmp", getBranch: () => [] },
+				sessionManager: {
+					getSessionId: () => "radius",
+					getCwd: () => "/tmp",
+					getSessionFile: () => undefined,
+					iterateBranchEntries() {},
+					getBranch: () => [],
+				},
 				state: { systemPrompt: "", tools: [] },
 				settingsManager: { getSessionShareDestination: () => "radius" },
 				modelRuntime: { getProvider: () => undefined },

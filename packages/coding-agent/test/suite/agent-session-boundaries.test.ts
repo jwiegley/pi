@@ -2,7 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createHarness as createBaseHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve = () => {};
@@ -12,7 +12,8 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 	return { promise, resolve };
 }
 
-describe("AgentSession actionable boundaries", () => {
+describe.each([false, true])("AgentSession actionable boundaries with persistence=%s", (persistSession) => {
+	const createHarness = (options: HarnessOptions = {}) => createBaseHarness({ ...options, persistSession });
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {
@@ -738,7 +739,8 @@ describe("AgentSession actionable boundaries", () => {
 	});
 });
 
-describe("durable length recovery", () => {
+describe.each([false, true])("durable length recovery with persistence=%s", (persistSession) => {
+	const createHarness = (options: HarnessOptions = {}) => createBaseHarness({ ...options, persistSession });
 	const harnesses: Harness[] = [];
 
 	afterEach(() => {

@@ -146,7 +146,12 @@ async function promptForOptions(
 	};
 }
 
-function buildBundle(session: AgentSession, options: BugReportOptions, summary: string | undefined): BugReportBundle {
+/** Exported for testing */
+export function buildBundle(
+	session: AgentSession,
+	options: BugReportOptions,
+	summary: string | undefined,
+): BugReportBundle {
 	const extensions = session.resourceLoader.getExtensions();
 	return {
 		metadata: collectBugReportMetadata({
@@ -155,7 +160,7 @@ function buildBundle(session: AgentSession, options: BugReportOptions, summary: 
 			cwd: session.sessionManager.getCwd(),
 			includeSession: options.includeSession,
 			includeSummary: summary !== undefined,
-			messageCount: session.messages.length,
+			messageCount: session.messageCount,
 			model: session.model,
 			modelRuntime: session.modelRuntime,
 			thinkingLevel: session.thinkingLevel,

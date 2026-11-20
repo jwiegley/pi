@@ -51,15 +51,19 @@ function createTreeUI() {
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		flushCompactionQueue: vi.fn(async () => {}),
+		openTreeSelector: Reflect.get(InteractiveMode.prototype, "openTreeSelector") as () => Promise<void>,
 	};
-	const showTreeSelector = Reflect.get(InteractiveMode.prototype, "showTreeSelector") as (this: typeof ui) => void;
-	showTreeSelector.call(ui);
+	const showTreeSelector = Reflect.get(InteractiveMode.prototype, "showTreeSelector") as (
+		this: typeof ui,
+	) => Promise<void>;
+	const ready = showTreeSelector.call(ui);
 
 	return {
 		ui,
 		onEscape,
 		targetId,
 		async select() {
+			await ready;
 			expect(selector).toBeDefined();
 			await selector!.getTreeList().onSelect!(targetId);
 		},

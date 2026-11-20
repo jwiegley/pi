@@ -291,3 +291,9 @@ for (const line of lines) {
   }
 }
 ```
+
+## Bounded history reads
+
+Use `getEntriesPage()` for a bounded append-order page and `getTreePage()` for flat tree metadata. `getEntries()` and `getTree()` are deprecated compatibility APIs that materialize complete history.
+
+`getTreePage()` accepts `afterOrdinal`, `beforeOrdinal`, `direction`, and `limit` (default 256, maximum 4096). Cursors are exclusive. Forward pages use `afterOrdinal`; reverse pages use `beforeOrdinal` and contain the newest records while remaining chronological within each page. `nextOrdinal` is the cursor for the next page in that direction, or `null` at the end. Fetch a specific payload with `getEntry(id)` when needed.
