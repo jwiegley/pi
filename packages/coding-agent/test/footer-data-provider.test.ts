@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from "child_process";
-import { existsSync, type FSWatcher, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, type FSWatcher, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -81,16 +81,6 @@ function emitReftableChange(provider: FooterDataProvider): void {
 	const { reftableWatcher } = provider as unknown as { reftableWatcher: FSWatcher | null };
 	expect(reftableWatcher).not.toBeNull();
 	reftableWatcher?.emit("change", "change", "tables.list");
-}
-
-async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void> {
-	const startedAt = Date.now();
-	while (!condition()) {
-		if (Date.now() - startedAt > timeoutMs) {
-			throw new Error("Timed out waiting for condition");
-		}
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
 }
 
 describe("FooterDataProvider reftable branch detection", () => {
@@ -216,7 +206,7 @@ describe("FooterDataProvider reftable branch detection", () => {
 			expect(vi.mocked(execFile)).not.toHaveBeenCalled();
 			await vi.advanceTimersByTimeAsync(2);
 			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
-			await vi.advanceTimersByTimeAsync(650);
+			await vi.advanceTimersByTimeAsync(1000);
 			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
 		} finally {
 			provider.dispose();
@@ -235,13 +225,17 @@ describe("FooterDataProvider reftable branch detection", () => {
 			const onBranchChange = vi.fn();
 			provider.onBranchChange(onBranchChange);
 
-			writeFileSync(join(reftableDir, "tables.list"), "1\n");
-			// Real fs watcher events can arrive late under full-suite load.
-			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1, 10_000);
-			await waitFor(() => provider.getGitBranch() === "foo", 10_000);
+			await vi.waitFor(
+				() => {
+					const branch = provider.getGitBranch();
+					// Darwin can miss the first write while the watcher starts.
+					if (branch === "main") appendFileSync(join(reftableDir, "tables.list"), "updated\n");
+					expect(branch).toBe("foo");
+				},
+				{ interval: 1000, timeout: 10_000 },
+			);
 
-			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
-			expect(provider.getGitBranch()).toBe("foo");
+			expect(vi.mocked(execFile)).toHaveBeenCalled();
 			expect(onBranchChange).toHaveBeenCalledTimes(1);
 		} finally {
 			provider.dispose();

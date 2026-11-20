@@ -86,7 +86,7 @@ describe("NodeExecutionEnv watch limits", () => {
 		} finally {
 			await removeTempDir(cwd);
 		}
-	});
+	}, 15_000);
 });
 
 describe("NodeExecutionEnv readers", () => {

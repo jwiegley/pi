@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import { defineConfig, mergeConfig } from "vitest/config";
 import baseConfig, { workspaceSourcePaths } from "../../vitest.base.ts";
 
@@ -8,6 +9,8 @@ export default mergeConfig(
 			globals: true,
 			environment: "node",
 			testTimeout: 30000,
+			// Integration tests spawn extra processes and stream large histories; avoid starving them.
+			maxWorkers: Math.min(16, availableParallelism()),
 			// Tests run offline by default; opt in with allowNetwork() from test/test-network-env.ts.
 			env: { PI_OFFLINE: "1" },
 			unstubEnvs: true,

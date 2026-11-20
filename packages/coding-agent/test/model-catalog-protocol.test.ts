@@ -105,8 +105,23 @@ describe("model catalog protocol with the current client", () => {
 		await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 	});
 
-	it("negotiates the catalog for its version and reaches the OpenRouter API", async () => {
+	it("negotiates the catalog for its version and reaches the OpenRouter API", async ({ onTestFinished }) => {
 		allowNetwork();
+		const openRouterRequests: string[] = [];
+		const nativeFetch = globalThis.fetch;
+		vi.stubGlobal("fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+			const request = new Request(input, init);
+			const url = new URL(request.url);
+			if (url.origin === catalogBaseUrl) return nativeFetch(request);
+			if (url.origin !== "https://openrouter.ai") throw new Error(`Unexpected request to ${url}`);
+			openRouterRequests.push(`${request.method} ${url.pathname}`);
+			if (url.pathname === "/api/v1/models/user") return Response.json({ data: [{ id: modelId }] });
+			return new Response(null, { status: 400 });
+		});
+		onTestFinished(() => {
+			vi.unstubAllGlobals();
+		});
+
 		const runtime = await ModelRuntime.create({
 			credentials: new InMemoryCredentialStore(),
 			modelsPath: null,
@@ -126,25 +141,14 @@ describe("model catalog protocol with the current client", () => {
 		expect(model).toMatchObject({ api: expectedModel.api, baseUrl: expectedModel.baseUrl });
 		if (!model) throw new Error(`Missing model: openrouter/${modelId}`);
 
-		let providerUrl: URL | undefined;
-		const nativeFetch = globalThis.fetch;
-		vi.stubGlobal("fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-			const request = new Request(input, init);
-			if (new URL(request.url).origin !== "https://openrouter.ai") return nativeFetch(request);
-			providerUrl = new URL(request.url);
-			throw new Error("Provider request captured");
-		});
-		try {
-			await runtime.completeSimple(
-				model,
-				{ messages: [{ role: "user", content: "Hello", timestamp: 0 }] },
-				{ apiKey: "test-key", maxRetries: 0 },
-			);
-		} finally {
-			vi.unstubAllGlobals();
-		}
-		expect(providerUrl?.pathname).toBe(
-			expectedModel.api === "anthropic-messages" ? "/api/v1/messages" : "/api/v1/chat/completions",
+		await runtime.completeSimple(
+			model,
+			{ messages: [{ role: "user", content: "Hello", timestamp: 0 }] },
+			{ apiKey: "test-key", maxRetries: 0 },
 		);
+		expect(openRouterRequests).toEqual([
+			"GET /api/v1/models/user",
+			expectedModel.api === "anthropic-messages" ? "POST /api/v1/messages" : "POST /api/v1/chat/completions",
+		]);
 	});
 });
