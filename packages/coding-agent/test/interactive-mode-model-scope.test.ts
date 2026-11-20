@@ -4,7 +4,7 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 type ModelScopeContext = {
-	session: { scopedModels: Array<{ model: { id: string }; thinkingLevel?: string }> };
+	session: { hasModelScope: boolean; scopedModels: Array<{ model: { id: string }; thinkingLevel?: string }> };
 	keybindings: { getKeys: (keybinding: string) => string[] };
 	headerContainer: Container;
 	shouldShowStartupDetails: () => boolean;
@@ -18,9 +18,16 @@ type InteractiveModePrivate = {
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrivate;
 
-function createContext(showDetails = true): ModelScopeContext {
+function createContext(
+	showDetails = true,
+	scopedModels: ModelScopeContext["session"]["scopedModels"] = [
+		{ model: { id: "model-a" }, thinkingLevel: "high" },
+		{ model: { id: "model-b" } },
+	],
+	hasModelScope = true,
+): ModelScopeContext {
 	return {
-		session: { scopedModels: [{ model: { id: "model-a" }, thinkingLevel: "high" }, { model: { id: "model-b" } }] },
+		session: { hasModelScope, scopedModels },
 		keybindings: { getKeys: () => ["ctrl+p"] },
 		headerContainer: new Container(),
 		shouldShowStartupDetails: () => showDetails,
@@ -48,6 +55,20 @@ describe("InteractiveMode model scope notice", () => {
 
 		const rendered = stripAnsi(context.headerContainer.render(120).join("\n"));
 		expect(rendered).toContain("Model scope: model-a:high, model-b (Ctrl+P to cycle)");
+	});
+
+	it("shows an explicit scope with no available models", () => {
+		const context = createContext(true, []);
+		interactiveModePrototype.showFullscreenModelScopeNotice.call(context);
+
+		const rendered = stripAnsi(context.headerContainer.render(120).join("\n"));
+		expect(rendered).toContain("Model scope: (none currently available) (Ctrl+P to cycle)");
+	});
+
+	it("adds nothing without a model scope", () => {
+		const context = createContext(true, [], false);
+		interactiveModePrototype.showFullscreenModelScopeNotice.call(context);
+		expect(context.headerContainer.children).toHaveLength(0);
 	});
 
 	it("adds nothing when startup details are hidden", () => {

@@ -86,7 +86,9 @@ describe("RPC diagnostics after session replacement", () => {
 		child.stdin.end();
 		await exited;
 
-		expect(stderr.match(/Warning: No models match pattern "github-copilot\/missing-model"/g)).toHaveLength(1);
-		expect(stdout).not.toContain("No models match pattern");
+		expect(
+			stderr.match(/Warning: No model matches exact scoped reference "github-copilot\/missing-model"/g),
+		).toHaveLength(1);
+		expect(stdout).not.toContain("No model matches exact scoped reference");
 	}, 60_000);
 });

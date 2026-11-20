@@ -52,7 +52,12 @@ import { AuthStorage, ReadOnlyAuthStorage } from "./core/auth-storage.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { InlineExtension } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
-import { resolveCliModel, resolveModelScopeWithDiagnostics, type ScopedModel } from "./core/model-resolver.ts";
+import {
+	resolveCliModel,
+	resolveExactModelScopeWithDiagnostics,
+	resolveModelScopeWithDiagnostics,
+	type ScopedModel,
+} from "./core/model-resolver.ts";
 import { ModelRuntime } from "./core/model-runtime.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import type { ProgressEvent } from "./core/package-manager.ts";
@@ -496,6 +501,9 @@ export async function createSessionManager(
 function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
+	modelScopeConfigured: boolean,
+	scopedModelReferences: string[] | undefined,
+	modelScopeSource: "cli" | "settings" | undefined,
 	hasExistingSession: boolean,
 	modelRuntime: ModelRuntime,
 	settingsManager: SettingsManager,
@@ -573,11 +581,13 @@ function buildSessionOptions(
 	// Keep thinking level undefined when not explicitly set in the model pattern.
 	// Undefined delegates to model-switch precedence: preserve reasoning state, otherwise use
 	// the global, model-local, then built-in default.
-	if (scopedModels.length > 0) {
+	if (modelScopeConfigured) {
 		options.scopedModels = scopedModels.map((sm) => ({
 			model: sm.model,
 			thinkingLevel: sm.thinkingLevel,
 		}));
+		if (scopedModelReferences !== undefined) options.scopedModelReferences = [...scopedModelReferences];
+		options.modelScopeSource = modelScopeSource;
 	}
 
 	// API key from CLI - set as a non-persistent runtime override
@@ -800,6 +810,7 @@ export async function main(args: string[], options?: MainOptions) {
 			console.error(chalk.dim(event.message));
 		}
 	};
+	let retainedCliModelReferences: string[] | undefined;
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd,
 		agentDir,
@@ -880,16 +891,27 @@ export async function main(args: string[], options?: MainOptions) {
 			})),
 		];
 
-		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
-		const { scopedModels, diagnostics: modelScopeDiagnostics } =
-			modelPatterns && modelPatterns.length > 0
-				? await resolveModelScopeWithDiagnostics(modelPatterns, modelRuntime, {
-						signal: AbortSignal.timeout(15_000),
-					})
-				: { scopedModels: [], diagnostics: [] };
-		// Returned as diagnostics instead of printed: this factory runs again on /new, /resume and /fork,
-		// while the interactive TUI draws on the terminal (#11264).
-		diagnostics.push(...modelScopeDiagnostics);
+		const cliModelPatterns = parsed.models;
+		const storedModelReferences = settingsManager.getEnabledModels();
+		const modelScopeSource =
+			cliModelPatterns !== undefined ? "cli" : storedModelReferences !== undefined ? "settings" : undefined;
+		let scopedModelReferences = cliModelPatterns !== undefined ? retainedCliModelReferences : storedModelReferences;
+		let scopedModels: ScopedModel[] = [];
+		if (scopedModelReferences !== undefined || cliModelPatterns !== undefined) {
+			const options = { signal: AbortSignal.timeout(15_000) };
+			const scope =
+				scopedModelReferences !== undefined
+					? await resolveExactModelScopeWithDiagnostics(scopedModelReferences, modelRuntime, options)
+					: await resolveModelScopeWithDiagnostics(cliModelPatterns ?? [], modelRuntime, options);
+			scopedModels = scope.scopedModels;
+			diagnostics.push(...scope.diagnostics);
+			if (cliModelPatterns !== undefined && retainedCliModelReferences === undefined) {
+				retainedCliModelReferences = scopedModels.map(
+					({ model, thinkingLevel }) => `${model.provider}/${model.id}${thinkingLevel ? `:${thinkingLevel}` : ""}`,
+				);
+				scopedModelReferences = retainedCliModelReferences;
+			}
+		}
 		const {
 			options: sessionOptions,
 			cliThinkingFromModel,
@@ -897,6 +919,9 @@ export async function main(args: string[], options?: MainOptions) {
 		} = buildSessionOptions(
 			parsed,
 			scopedModels,
+			modelScopeSource !== undefined,
+			scopedModelReferences,
+			modelScopeSource,
 			sessionManager.buildSessionContextSource().messages.length > 0,
 			modelRuntime,
 			settingsManager,
@@ -921,6 +946,8 @@ export async function main(args: string[], options?: MainOptions) {
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
+			scopedModelReferences: sessionOptions.scopedModelReferences,
+			modelScopeSource: sessionOptions.modelScopeSource,
 			tools: sessionOptions.tools,
 			excludeTools: sessionOptions.excludeTools,
 			noTools: sessionOptions.noTools,

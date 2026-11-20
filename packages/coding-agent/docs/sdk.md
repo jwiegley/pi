@@ -116,6 +116,10 @@ Each boundary can be supplied explicitly:
 - `resourceLoader` supplies extensions, skills, prompt templates, themes, and context files.
 - `tools`, `noTools`, `excludeTools`, and `customTools` control the active tool set.
 
+Without an explicit model, selection first tries the restored session model, then an explicit scope, then settings defaults, then the first available model. An explicitly empty scope selects no model.
+
+`resolveModelScopeWithDiagnostics()` resolves CLI `--models` patterns. `resolveExactModelScopeWithDiagnostics()` resolves persisted `enabledModels` as exact `provider/model` identities intersected with the available catalog. Both return diagnostics instead of printing warnings.
+
 Use `DefaultResourceLoader` when you want standard discovery with selected overrides. Supply a custom `ResourceLoader` when the host owns resource storage and discovery completely.
 
 <a id="inlineextension"></a>
