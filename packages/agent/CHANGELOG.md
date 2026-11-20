@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added deferred message sources and reverse transcript iteration so coding-agent can keep persisted history outside the active heap.
+
 ## [1.6.0] - 2026-11-20
 
 ### Fixed

@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added SQLite-backed bounded session history with paged navigation, streamed export, atomic migration, and lazy active transcripts.
+- Added extension task turns with distinct steer, follow-up, and abort controls.
+- Added provider-scoped request and idle timeouts, model-local default thinking levels, and extension tool-renderer wrappers.
+- Added `models.json` schema descriptions and Models Configuration reference rows for provider `transport` timeouts and model `defaultThinkingLevel`.
+
+### Changed
+
+- Removed the automatic model-catalog refresh when interactive mode starts. The model selector, `/login`, `pi auth login`, and `pi update --models` still refresh catalogs, and RPC mode still refreshes them in the background when it starts.
+- Removed the bundled Pi documentation paths from the default system prompt.
+- `getActiveBranchMetadata()` on a persisted session returns frozen records, in a new array on every call.
+
+### Fixed
+
+- Fixed persisted model scopes expanding provider globs and admitting newly registered models that were never selected.
+- Fixed deferred footer renders retaining a replaced session after its history store closes.
+- Fixed `/bug` loading a session's whole deferred transcript into memory, and keeping it there, to count its messages and to write its summary.
+- Fixed bash output files being returned before their writes completed.
+- Fixed `ctx.ui.custom()` never disposing a component that its factory produced after `done()` had already been called.
+- Fixed `getActiveBranchMetadata()` on a persisted session running one SQLite lookup per ancestor on every call. The indexed store now keeps the active branch's metadata, follows leaf moves and appends, and rechecks it against rows that other writers index.
+- Fixed the other active-branch reads of a persisted session (`getRecentActiveEntries()`, `findRecentActiveEntry()`, `getLatestCustomEntry()` and `getLatestMessage()` with the active scope, `iterateActiveAncestry()`, and `getBranch()` of the leaf) running one SQLite lookup per ancestor while the store keeps the active branch's metadata.
+- Fixed every append to a persisted session re-reading and re-hashing the whole session JSONL. Under the source lock, an append now trusts an unchanged source generation, size, and last record that ends with LF, and re-hashes otherwise. Opening a session now re-hashes its indexed prefix and rebuilds the index when the prefix no longer matches.
+- Fixed a label change that was written to the session file not taking effect until the history store next opened, when the store failed to open after the write.
+
 ## [1.6.0] - 2026-11-20
 
 ### New Features
