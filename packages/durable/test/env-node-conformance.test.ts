@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type FileChange, getOrThrow } from "../src/env/index.ts";
 import { NodeExecutionEnv } from "../src/env/node.ts";
 import { registerEnvConformance } from "../src/testing/index.ts";
@@ -58,6 +59,50 @@ registerEnvConformance(
 	},
 	windows ? { shell: [gitBash, "-c"], symlinks: false } : {},
 );
+
+describe("NodeExecutionEnv watch timers", () => {
+	it.each(["native", "polling"] as const)("schedules %s rescans with the watch's persistence", async (mode) => {
+		const cwd = mkdtempSync(join(tmpdir(), "pi-durable-env-watch-"));
+		const pollIntervalMs = 307;
+		const env = new NodeExecutionEnv({ cwd, watch: { mode, pollIntervalMs } });
+		const timeout = vi.spyOn(globalThis, "setTimeout");
+		try {
+			const watcher = getOrThrow(await env.watch([{ path: "." }], () => {}, context));
+			try {
+				const rescans = timeout.mock.calls.flatMap(([, delay], index) =>
+					delay === pollIntervalMs ? [timeout.mock.results[index]!.value.hasRef()] : [],
+				);
+				expect(rescans).toEqual(mode === "polling" ? [true] : process.platform === "darwin" ? [false] : []);
+			} finally {
+				await watcher.stop(context);
+			}
+		} finally {
+			timeout.mockRestore();
+			await removeTempDir(cwd);
+		}
+	});
+
+	it("cancels all poll timers after native watch installation falls back to polling", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pi-durable-env-watch-"));
+		const env = new NodeExecutionEnv({ cwd, watch: { mode: "native" } });
+		const watch = vi.spyOn(fs, "watch").mockImplementationOnce(() => {
+			throw Object.assign(new Error("out of watches"), { code: "ENOSPC" });
+		});
+		syncBuiltinESMExports();
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const watcher = getOrThrow(await env.watch([{ path: "." }], () => {}, context));
+			await watcher.stop(context);
+			expect(watcher.mode).toBe("polling");
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			watch.mockRestore();
+			syncBuiltinESMExports();
+			vi.useRealTimers();
+			await removeTempDir(cwd);
+		}
+	});
+});
 
 describe("NodeExecutionEnv watch limits", () => {
 	it("refuses a tree over the directory budget and stops with an error when one grows past it", async () => {
