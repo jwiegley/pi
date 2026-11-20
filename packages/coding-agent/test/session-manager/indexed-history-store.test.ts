@@ -18,8 +18,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { acquireSourceLock, IndexedJsonlSessionHistoryStore } from "../../src/core/session-history-store.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	acquireSourceLock,
+	type EntryMetadata,
+	IndexedJsonlSessionHistoryStore,
+} from "../../src/core/session-history-store.ts";
 import {
 	type FileEntry,
 	type SessionEntry,
@@ -27,7 +31,7 @@ import {
 	SessionManager,
 	type SessionMessageEntry,
 } from "../../src/core/session-manager.ts";
-import { DatabaseSync } from "../../src/core/sqlite.ts";
+import { DatabaseSync, type StatementSync } from "../../src/core/sqlite.ts";
 
 const roots: string[] = [];
 
@@ -117,6 +121,202 @@ function writeSession(path: string, entries: FileEntry[], finalNewline = true): 
 
 function sha256(path: string): string {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+/** The uncached walk: the newest row for each id, from the leaf back to the root. */
+function walkActiveBranch(store: IndexedJsonlSessionHistoryStore): EntryMetadata[] {
+	const branch: EntryMetadata[] = [];
+	for (let id = store.leafId; id; ) {
+		const metadata = store.getEntryMetadata(id);
+		if (!metadata) break;
+		branch.unshift(metadata);
+		id = metadata.parentId;
+	}
+	return branch;
+}
+
+/** Spy on the store's lookup of one entry by id, which the uncached walk runs once per ancestor. */
+function spyOnIdLookups(store: IndexedJsonlSessionHistoryStore) {
+	const { byId } = Reflect.get(store, "entryStatements") as { byId: StatementSync };
+	return vi.spyOn(byId, "get");
+}
+
+function note(id: string, parentId: string | null, content: string): SessionEntry {
+	return {
+		type: "custom_message",
+		id,
+		parentId,
+		timestamp: `2026-01-01T00:00:${id.padStart(2, "0")}.000Z`,
+		customType: "note",
+		content,
+		display: true,
+	};
+}
+
+type ActiveRead = (store: IndexedJsonlSessionHistoryStore) => unknown;
+
+/** Reads that follow the active branch, keyed by name; each returns its result or the message it throws. */
+const activeBranchReads: Record<string, ActiveRead> = {
+	recent: (store) => store.getRecentActiveEntries(),
+	recentLimited: (store) => store.getRecentActiveEntries({ limit: 2 }),
+	recentUsers: (store) => store.getRecentActiveEntries({ type: "message", messageRole: "user", limit: 3 }),
+	recentThreadAfter02: (store) => store.getRecentActiveEntries({ customType: "thread", stopBeforeId: "02" }),
+	recentNotes: (store) => store.getRecentActiveEntries({ type: "custom_message" }),
+	recentStopAtLeaf: (store) => store.getRecentActiveEntries({ stopBeforeId: store.leafId ?? undefined }),
+	recentStopOffBranch: (store) => store.getRecentActiveEntries({ stopBeforeId: "09", limit: 5000 }),
+	findAssistant: (store) =>
+		store.findRecentActiveEntry(
+			{ type: "message" },
+			(entry) => entry.type === "message" && entry.message.role === "assistant",
+		),
+	findThreadAfter04: (store) => store.findRecentActiveEntry({ customType: "thread", stopBeforeId: "04" }, () => true),
+	findNothing: (store) => store.findRecentActiveEntry({}, () => false),
+	latestThread: (store) => store.getLatestCustomEntry("thread", "active"),
+	latestElsewhere: (store) => store.getLatestCustomEntry("elsewhere", "active"),
+	latestAbsentCustom: (store) => store.getLatestCustomEntry("absent", "active"),
+	latestMessage: (store) => store.getLatestMessage(undefined, "active"),
+	latestUser: (store) => store.getLatestMessage("user", "active"),
+	latestToolResult: (store) => store.getLatestMessage("toolResult", "active"),
+	branch: (store) => store.getBranch(),
+	branchFromLeaf: (store) => store.getBranch(store.leafId ?? undefined),
+	ancestry: async (store) => {
+		const visited: Array<{ id: string; entry: string | undefined }> = [];
+		await store.iterateActiveAncestry((metadata) => {
+			const entry = store.getEntry(metadata.id);
+			expect(store.getEntry(metadata.id)).toBe(entry);
+			visited.push({ id: metadata.id, entry: entry?.id });
+		});
+		return visited;
+	},
+};
+
+async function settle(read: () => unknown): Promise<{ value: unknown } | { error: string }> {
+	try {
+		return { value: await read() };
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/**
+ * Run every active-branch read on a store whose branch metadata is built and on a fresh store at the same leaf,
+ * which still walks the index. Return both outcomes and the warm store's per-ancestor lookups.
+ */
+async function compareActiveBranchReads(store: IndexedJsonlSessionHistoryStore) {
+	const cold = IndexedJsonlSessionHistoryStore.open(store.filePath);
+	try {
+		cold.setVolatileLeaf(store.leafId);
+		store.getActiveBranchMetadata();
+		const lookups = spyOnIdLookups(store);
+		const warm: Record<string, unknown> = {};
+		const expected: Record<string, unknown> = {};
+		for (const [name, read] of Object.entries(activeBranchReads)) {
+			warm[name] = await settle(() => read(store));
+			expected[name] = await settle(() => read(cold));
+		}
+		const calls = lookups.mock.calls.length;
+		lookups.mockRestore();
+		return { warm, expected, lookups: calls };
+	} finally {
+		cold.close();
+	}
+}
+
+/** Record the source's current generation in its sidecar, as a filesystem with coarse timestamps would keep it. */
+function keepIndexedGeneration(indexPath: string, path: string): void {
+	const stats = statSync(path, { bigint: true });
+	const db = new DatabaseSync(indexPath);
+	db.prepare(
+		"UPDATE source_state SET source_dev = ?, source_ino = ?, source_mtime_ns = ?, source_ctime_ns = ? WHERE singleton = 1",
+	).run(Number(stats.dev), Number(stats.ino), stats.mtimeNs.toString(), stats.ctimeNs.toString());
+	db.close();
+}
+
+async function runWorker(workerPath: string, args: string[]): Promise<string> {
+	const child = spawn(process.execPath, ["--experimental-strip-types", workerPath, ...args], {
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let stdout = "";
+	let stderr = "";
+	child.stdout.on("data", (chunk) => {
+		stdout += chunk.toString();
+	});
+	child.stderr.on("data", (chunk) => {
+		stderr += chunk.toString();
+	});
+	await new Promise<void>((resolve, reject) => {
+		child.once("exit", (code) => (code === 0 ? resolve() : reject(new Error(`worker exited ${code}: ${stderr}`))));
+		child.once("error", reject);
+	});
+	return stdout;
+}
+
+/**
+ * Open a session, append two entries, and print how many bytes of the session JSONL each append read through the
+ * descriptor it appends with ("a+") and through any other descriptor. With a replacement path, the first append's open
+ * of the JSONL first swaps in a byte-identical copy under a new inode.
+ */
+const appendReadsWorker = `import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const [targetPath, replacementPath] = process.argv.slice(2);
+const path = fs.realpathSync(targetPath);
+const { openSync, closeSync, readSync } = fs;
+const sourceFds = new Set();
+const appendFds = new Set();
+const bytesRead = { appendDescriptor: 0, other: 0 };
+let replaced = false;
+fs.openSync = function(pathArg, flags, mode) {
+  if (replacementPath && !replaced && pathArg === path && flags === "a+") {
+    fs.copyFileSync(path, replacementPath);
+    fs.renameSync(replacementPath, path);
+    replaced = true;
+  }
+  const fd = mode === undefined ? openSync(pathArg, flags) : openSync(pathArg, flags, mode);
+  if (pathArg === path) (flags === "a+" ? appendFds : sourceFds).add(fd);
+  return fd;
+};
+fs.closeSync = function(fd) {
+  sourceFds.delete(fd);
+  appendFds.delete(fd);
+  return closeSync(fd);
+};
+fs.readSync = function(fd, ...rest) {
+  const read = readSync(fd, ...rest);
+  if (appendFds.has(fd)) bytesRead.appendDescriptor += read;
+  else if (sourceFds.has(fd)) bytesRead.other += read;
+  return read;
+};
+syncBuiltinESMExports();
+const { IndexedJsonlSessionHistoryStore } = await import(${JSON.stringify(new URL("../../src/core/session-history-store.ts", import.meta.url).href)});
+const store = IndexedJsonlSessionHistoryStore.open(path);
+const appendReads = [];
+for (let index = 0; index < 2; index++) {
+  const before = { ...bytesRead };
+  store.append({
+    type: "custom", id: "appended-" + index, parentId: store.leafId,
+    timestamp: "2026-01-01T00:02:0" + index + ".000Z", customType: "test", data: index,
+  });
+  appendReads.push({
+    appendDescriptor: bytesRead.appendDescriptor - before.appendDescriptor,
+    other: bytesRead.other - before.other,
+  });
+}
+process.stdout.write(JSON.stringify({ appendReads, replaced, entryCount: store.getHistorySummary().entryCount }) + "\\n");
+store.close();
+`;
+
+interface AppendReads {
+	appendReads: Array<{ appendDescriptor: number; other: number }>;
+	replaced: boolean;
+	entryCount: number;
+}
+
+function linearSession(path: string, length: number): void {
+	const entries: FileEntry[] = [header()];
+	for (let index = 0; index < length; index++) {
+		entries.push(user(`q${index}`, index === 0 ? null : `q${index - 1}`, `turn ${index}`, index));
+	}
+	writeSession(path, entries);
 }
 
 describe("IndexedJsonlSessionHistoryStore", () => {
@@ -1563,5 +1763,522 @@ store.close();
 			content: [],
 		});
 		manager.close();
+	});
+});
+
+describe("IndexedJsonlSessionHistoryStore active branch metadata", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("matches the uncached walk across leaf moves, appends, and other writers", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			user("u1", null, "u1", 1),
+			assistant("a1", "u1", 1, 0),
+			user("u2", "a1", "u2", 2),
+			assistant("a2", "u2", 1, 0),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const check = (step: string) => {
+			expect(store.getActiveBranchMetadata(), step).toEqual(walkActiveBranch(store));
+		};
+
+		check("open");
+		store.append(user("u3", "a2", "u3", 3));
+		check("append on the leaf");
+		store.append(assistant("a3", "u3", 1, 0));
+		store.append(custom("c1", "a3", "state"));
+		check("two more appends");
+		store.setVolatileLeaf("u2");
+		check("leaf moved to an ancestor");
+		store.append(assistant("b1", "u2", 1, 0));
+		check("append starts a sibling branch");
+		store.setVolatileLeaf("c1");
+		check("leaf moved to the other branch");
+		store.setVolatileLeaf("a1");
+		store.setVolatileLeaf("u2");
+		check("leaf moved down to a child");
+		store.setVolatileLeaf(null);
+		check("leaf reset");
+		store.append(user("r1", null, "new root", 4));
+		check("append a new root");
+		store.setVolatileLeaf("c1");
+		store.append(compaction("k1", "c1", "a3"));
+		check("append a compaction");
+		store.append(user("u4", "k1", "after compaction", 5));
+		check("append after the compaction");
+		const other = IndexedJsonlSessionHistoryStore.open(path);
+		other.append(user("x1", "b1", "off the active path", 6));
+		check("another store appends off the active path");
+		store.append(assistant("a4", "u4", 1, 0));
+		check("own append after another store's");
+		appendFileSync(path, `${JSON.stringify(user("u3", "x1", "repeats an active-path id", 7))}\n`);
+		other.flush();
+		check("a raw row repeats an active-path id");
+		other.close();
+		const last = assistant("a5", "a4", 1, 0);
+		store.append(last);
+		store.append(last);
+		check("idempotent re-append");
+		store.setVolatileLeaf("b1");
+		check("leaf moved to an older branch");
+		store.flush();
+		check("flush adopts the newest entry");
+		const copy = store.getActiveBranchMetadata();
+		copy.reverse();
+		copy.splice(0, 2);
+		check("caller reordered and cut its copy");
+		try {
+			copy[0]!.type = "mutated";
+		} catch {}
+		check("caller tried to change a record");
+		store.close();
+	});
+
+	it("rechecks the cached branch against rows that other writers index", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "root"),
+			custom("02", "01", "middle"),
+			custom("03", "02", "kept"),
+			custom("04", "03", "leaf"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const ids = () => store.getActiveBranchMetadata().map(({ id }) => id);
+		expect(ids()).toEqual(["01", "02", "03", "04"]);
+
+		const other = IndexedJsonlSessionHistoryStore.open(path);
+		other.append(custom("05", "02", "off the active path"));
+		expect(ids()).toEqual(["01", "02", "03", "04"]);
+		expect(store.getActiveBranchMetadata()).toEqual(walkActiveBranch(store));
+
+		// The newest row for an id wins, so this row moves 03, and with it the leaf's ancestry, under 05.
+		appendFileSync(path, `${JSON.stringify(custom("03", "05", "repeats an active-path id"))}\n`);
+		other.flush();
+		expect(ids()).toEqual(["01", "02", "05", "03", "04"]);
+		expect(store.getActiveBranchMetadata()).toEqual(walkActiveBranch(store));
+		other.close();
+		store.close();
+	});
+
+	it("extends the cached branch when another writer indexes the missing parent of its root", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "elsewhere"),
+			custom("02", "missing", "orphan root"),
+			custom("03", "02", "leaf"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const ids = () => store.getActiveBranchMetadata().map(({ id }) => id);
+		expect(ids()).toEqual(["02", "03"]);
+
+		const other = IndexedJsonlSessionHistoryStore.open(path);
+		other.append(custom("missing", null, "late parent"));
+		expect(ids()).toEqual(["missing", "02", "03"]);
+		expect(store.getActiveBranchMetadata()).toEqual(walkActiveBranch(store));
+		other.close();
+		store.close();
+	});
+
+	it("reports a cycle that a repeated id closes, as the uncached walk does", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "root"),
+			custom("02", "01", "middle"),
+			custom("03", "02", "leaf"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		expect(store.getActiveBranchMetadata()).toHaveLength(3);
+
+		store.append(custom("01", "03", "repeats the root id"));
+		const cold = IndexedJsonlSessionHistoryStore.open(path);
+		expect(() => cold.getActiveBranchMetadata()).toThrow("Cycle in session ancestry at 02");
+		expect(() => store.getActiveBranchMetadata()).toThrow("Cycle in session ancestry at 02");
+		cold.close();
+		store.close();
+	});
+
+	it("hands out a detached array of frozen records on every read", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "root"),
+			custom("02", "01", "middle"),
+			custom("03", "02", "leaf"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const first = store.getActiveBranchMetadata();
+		const second = store.getActiveBranchMetadata();
+		expect(second).not.toBe(first);
+		expect(second).toEqual(first);
+
+		first.reverse();
+		first.pop();
+		expect(store.getActiveBranchMetadata()).toEqual(second);
+		expect(second.every((metadata) => Object.isFrozen(metadata))).toBe(true);
+		expect(() => {
+			second[0]!.type = "mutated";
+		}).toThrow(TypeError);
+		expect(store.getActiveBranchMetadata()[0]).toMatchObject({ id: "01", type: "custom" });
+		store.close();
+	});
+
+	it("serves warm reads and the read after an append without per-ancestor lookups", () => {
+		const path = join(createRoot(), "session.jsonl");
+		linearSession(path, 400);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		expect(store.getActiveBranchMetadata()).toHaveLength(400);
+
+		const lookups = spyOnIdLookups(store);
+		for (let read = 0; read < 5; read++) expect(store.getActiveBranchMetadata()).toHaveLength(400);
+		expect(lookups).not.toHaveBeenCalled();
+
+		store.append(user("q400", "q399", "turn 400", 400));
+		lookups.mockClear();
+		const afterAppend = store.getActiveBranchMetadata();
+		expect(lookups).not.toHaveBeenCalled();
+		expect(afterAppend).toHaveLength(401);
+		expect(afterAppend).toEqual(walkActiveBranch(store));
+		store.close();
+	});
+});
+
+describe("IndexedJsonlSessionHistoryStore active branch readers", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("answer from the built branch exactly as the index walk does", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			user("01", null, "first question", 1),
+			assistant("02", "01", 1, 0),
+			custom("03", "02", "thread state", "thread"),
+			user("04", "03", "second question", 4),
+			assistant("05", "04", 1, 0),
+			note("06", "05", "a note"),
+			custom("07", "06", "newer thread state", "thread"),
+			user("08", "07", "third question", 8),
+			custom("09", "05", "abandoned state", "elsewhere"),
+			compaction("10", "08", "04"),
+			user("11", "10", "after compaction", 11),
+			assistant("12", "11", 1, 0),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const check = async (step: string) => {
+			const { warm, expected, lookups } = await compareActiveBranchReads(store);
+			expect(warm, step).toEqual(expected);
+			expect(lookups, step).toBe(0);
+		};
+
+		await check("leaf at the newest entry");
+		store.setVolatileLeaf("08");
+		await check("leaf moved to an ancestor");
+		store.setVolatileLeaf("09");
+		await check("leaf on the abandoned branch");
+		store.setVolatileLeaf("06");
+		await check("leaf on a note");
+		store.setVolatileLeaf("12");
+		store.append(user("13", "12", "appended", 13));
+		await check("after an append");
+		store.setVolatileLeaf(null);
+		await check("leaf reset");
+		store.close();
+	});
+
+	it("make no per-ancestor lookups for reads that walk the whole branch today", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		linearSession(path, 400);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const cold = IndexedJsonlSessionHistoryStore.open(path);
+		expect(store.getActiveBranchMetadata()).toHaveLength(400);
+		const reads: Record<string, ActiveRead> = {
+			recentNotes: (target) => target.getRecentActiveEntries({ type: "custom_message" }),
+			findCustom: (target) => target.findRecentActiveEntry({ type: "custom" }, () => true),
+			latestAbsentCustom: (target) => target.getLatestCustomEntry("absent", "active"),
+			latestAssistant: (target) => target.getLatestMessage("assistant", "active"),
+			ancestry: async (target) => {
+				const ids: string[] = [];
+				await target.iterateActiveAncestry(({ id }) => {
+					ids.push(id);
+				});
+				return ids;
+			},
+			branch: (target) => target.getBranch().map(({ id }) => id),
+		};
+		for (const [name, read] of Object.entries(reads)) {
+			const lookups = spyOnIdLookups(store);
+			const value = await read(store);
+			expect(lookups, name).not.toHaveBeenCalled();
+			lookups.mockRestore();
+			expect(value, name).toEqual(await read(cold));
+		}
+		cold.close();
+		store.close();
+	});
+
+	it("walk the index without building the branch when it is not built", () => {
+		const path = join(createRoot(), "session.jsonl");
+		linearSession(path, 400);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const lookups = spyOnIdLookups(store);
+		expect(store.getRecentActiveEntries({ limit: 1 }).map(({ id }) => id)).toEqual(["q399"]);
+		expect(store.getLatestMessage("user", "active")).toMatchObject({ id: "q399" });
+		expect(lookups).toHaveBeenCalledTimes(2);
+		lookups.mockClear();
+		expect(store.getActiveBranchMetadata()).toHaveLength(400);
+		expect(lookups).toHaveBeenCalledTimes(400);
+		store.close();
+	});
+
+	it("keep today's results for a root whose parent is missing", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "elsewhere", "elsewhere"),
+			custom("02", "missing", "orphan root", "thread"),
+			user("03", "02", "question", 3),
+			custom("04", "03", "leaf state", "thread"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const { warm, expected, lookups } = await compareActiveBranchReads(store);
+		expect(warm).toEqual(expected);
+		expect(lookups).toBe(0);
+		expect(warm.latestAbsentCustom).toEqual({ error: "Cycle in session ancestry at missing" });
+		store.close();
+	});
+
+	it("walk and throw today's cycle error once a root with a missing parent heads every indexed row", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("02", "missing", "orphan root"),
+			custom("03", "02", "middle"),
+			custom("04", "03", "leaf"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		store.setVolatileLeaf("03");
+		expect(store.getActiveBranchMetadata().map(({ id }) => id)).toEqual(["02", "03"]);
+		// Moving down to an existing child extends the built branch to all three rows without indexing one.
+		store.setVolatileLeaf("04");
+
+		const cold = IndexedJsonlSessionHistoryStore.open(path);
+		const reads: Record<string, ActiveRead> = {
+			metadata: (target) => target.getActiveBranchMetadata().map(({ id }) => id),
+			branch: (target) => target.getBranch().map(({ id }) => id),
+			recentNotes: (target) => target.getRecentActiveEntries({ type: "custom_message" }),
+			findNothing: (target) => target.findRecentActiveEntry({}, () => false),
+			...activeBranchReads,
+		};
+		for (const [name, read] of Object.entries(reads)) {
+			expect(await settle(() => read(store)), name).toEqual(await settle(() => read(cold)));
+		}
+		for (const name of ["metadata", "branch", "recentNotes", "findNothing"]) {
+			expect(await settle(() => reads[name](store)), name).toEqual({
+				error: "Cycle in session ancestry at missing",
+			});
+		}
+		cold.close();
+		store.close();
+	});
+
+	it("throw today's cycle error after a repeated id closes a loop", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			user("01", null, "root", 1),
+			custom("02", "01", "middle"),
+			user("03", "02", "leaf", 3),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		expect(store.getActiveBranchMetadata()).toHaveLength(3);
+		store.append(user("01", "03", "repeats the root id", 4));
+
+		const cold = IndexedJsonlSessionHistoryStore.open(path);
+		for (const [name, read] of Object.entries(activeBranchReads)) {
+			expect(await settle(() => read(store)), name).toEqual(await settle(() => read(cold)));
+		}
+		expect(await settle(() => store.getRecentActiveEntries())).toEqual({
+			error: "Cycle in session ancestry at 02",
+		});
+		cold.close();
+		store.close();
+	});
+
+	it("keep walking the branch they started with when a callback appends or moves the leaf", async () => {
+		const path = join(createRoot(), "session.jsonl");
+		linearSession(path, 6);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const original = store.getActiveBranchMetadata().map(({ id }) => id);
+		let appended = 0;
+		const appendUnderRoot = () => {
+			store.setVolatileLeaf("q0");
+			store.append(user(`side-${appended}`, "q0", "side branch", 100 + appended++));
+		};
+
+		const visited: string[] = [];
+		await store.iterateActiveAncestry(({ id }) => {
+			if (visited.length === 0) appendUnderRoot();
+			visited.push(id);
+		});
+		expect(visited).toEqual([...original].reverse());
+
+		store.setVolatileLeaf("q5");
+		store.getActiveBranchMetadata();
+		const checked: string[] = [];
+		const found = store.findRecentActiveEntry({ type: "message" }, (entry) => {
+			if (checked.length === 0) appendUnderRoot();
+			checked.push(entry.id);
+			return entry.id === "q1";
+		});
+		expect(found).toMatchObject({ id: "q1" });
+		expect(checked).toEqual(["q5", "q4", "q3", "q2", "q1"]);
+		store.close();
+	});
+});
+
+describe("IndexedJsonlSessionHistoryStore append integrity", () => {
+	it("appends without re-reading the indexed prefix while its generation, size, and last record hold", async () => {
+		const root = createRoot();
+		const path = join(root, "session.jsonl");
+		const workerPath = join(root, "append-reads.ts");
+		const entries: FileEntry[] = [header()];
+		for (let index = 0; index < 64; index++) {
+			entries.push(user(`m${index}`, index === 0 ? null : `m${index - 1}`, "x".repeat(2048), index));
+		}
+		writeSession(path, entries);
+		writeFileSync(workerPath, appendReadsWorker);
+		const prefixBytes = statSync(path).size;
+
+		const result = JSON.parse(await runWorker(workerPath, [path])) as AppendReads;
+		expect(result.entryCount).toBe(66);
+		expect(result.appendReads).toHaveLength(2);
+		for (const { appendDescriptor, other } of result.appendReads) {
+			expect(appendDescriptor + other).toBeLessThan(prefixBytes / 4);
+		}
+	}, 30_000);
+
+	it("re-hashes the indexed prefix when the append opens a replaced file", async () => {
+		const root = createRoot();
+		const path = join(root, "session.jsonl");
+		const workerPath = join(root, "append-reads.ts");
+		const entries: FileEntry[] = [header()];
+		for (let index = 0; index < 64; index++) {
+			entries.push(user(`m${index}`, index === 0 ? null : `m${index - 1}`, "x".repeat(2048), index));
+		}
+		writeSession(path, entries);
+		writeFileSync(workerPath, appendReadsWorker);
+		const prefixBytes = statSync(path).size;
+
+		const result = JSON.parse(await runWorker(workerPath, [path, join(root, "replacement.jsonl")])) as AppendReads;
+		expect(result.replaced).toBe(true);
+		expect(result.entryCount).toBe(66);
+		// The check before writing re-hashes through the new descriptor; rebinding the reader afterwards is not enough.
+		expect(result.appendReads[0]!.appendDescriptor).toBeGreaterThanOrEqual(prefixBytes);
+		const second = result.appendReads[1]!;
+		expect(second.appendDescriptor + second.other).toBeLessThan(prefixBytes / 4);
+	}, 30_000);
+
+	it("re-hashes the indexed prefix and refuses the append when the last indexed record changed", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "first"),
+			custom("02", "01", "middle"),
+			custom("03", "02", "last"),
+		]);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const before = readFileSync(path, "utf8");
+		const edited = before.replace('"data":"middle"', '"data":"edited"').replace('"data":"last"', '"data":"lost"');
+		expect(Buffer.byteLength(edited)).toBe(Buffer.byteLength(before));
+		writeFileSync(path, edited);
+		keepIndexedGeneration(store.indexPath, path);
+
+		expect(() => store.append(custom("04", "03", "after"))).toThrow(
+			"Session JSONL changed outside the indexed writer before append",
+		);
+		expect(readFileSync(path, "utf8")).toBe(edited);
+		store.close();
+	});
+
+	it("rebuilds at open after an equal-length edit that keeps the generation, size, and last record", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [
+			header(),
+			custom("01", null, "first"),
+			custom("02", "01", "middle"),
+			custom("03", "02", "last"),
+		]);
+		const first = IndexedJsonlSessionHistoryStore.open(path);
+		const indexPath = first.indexPath;
+		first.close();
+
+		const before = readFileSync(path, "utf8");
+		const after = before.replace('"id":"02","parentId":"01"', '"id":"02","parentId":"99"');
+		expect(after).not.toBe(before);
+		expect(Buffer.byteLength(after)).toBe(Buffer.byteLength(before));
+		writeFileSync(path, after);
+		keepIndexedGeneration(indexPath, path);
+
+		const reopened = IndexedJsonlSessionHistoryStore.open(path);
+		expect(reopened.getEntryMetadata("02")?.parentId).toBe("99");
+		expect(reopened.getBranch("03").map((entry) => entry.id)).toEqual(["02", "03"]);
+		reopened.close();
+	});
+
+	it("keeps the index of a valid final record without LF across a reopen", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(path, [header(), custom("01", null, "first"), custom("02", "01", "unsealed")], false);
+		const first = IndexedJsonlSessionHistoryStore.open(path);
+		const indexPath = first.indexPath;
+		first.close();
+		// A rebuild replaces the sidecar and drops this table; an inode number could be reused.
+		const marker = new DatabaseSync(indexPath);
+		marker.exec("CREATE TABLE reopen_sentinel (kept INTEGER)");
+		marker.close();
+
+		const reopened = IndexedJsonlSessionHistoryStore.open(path);
+		expect(reopened.getEntry("02")).toMatchObject({ data: "unsealed" });
+		reopened.close();
+		const check = new DatabaseSync(indexPath);
+		expect(check.prepare("SELECT name FROM sqlite_master WHERE name = 'reopen_sentinel'").get()).toEqual({
+			name: "reopen_sentinel",
+		});
+		check.close();
+	});
+
+	it("re-hashes before appending after an indexed final record without LF", () => {
+		const path = join(createRoot(), "session.jsonl");
+		writeSession(
+			path,
+			[header(), custom("01", null, "first"), custom("02", "01", "middle"), custom("03", "02", "last")],
+			false,
+		);
+		const store = IndexedJsonlSessionHistoryStore.open(path);
+		const before = readFileSync(path, "utf8");
+		const edited = before.replace('"id":"02","parentId":"01"', '"id":"02","parentId":"99"');
+		expect(edited).not.toBe(before);
+		expect(Buffer.byteLength(edited)).toBe(Buffer.byteLength(before));
+		writeFileSync(path, edited);
+		keepIndexedGeneration(store.indexPath, path);
+
+		// Sealing the final record re-derives the prefix chain from the file, so a check that skipped the prefix here
+		// would certify the edit and the next open would keep the stale index.
+		expect(() => store.append(custom("04", "03", "after"))).toThrow(
+			"Session JSONL changed outside the indexed writer before append",
+		);
+		expect(readFileSync(path, "utf8")).toBe(edited);
+		store.close();
+
+		const reopened = IndexedJsonlSessionHistoryStore.open(path);
+		expect(reopened.getEntryMetadata("02")?.parentId).toBe("99");
+		expect(reopened.getBranch("03").map((entry) => entry.id)).toEqual(["02", "03"]);
+		reopened.close();
 	});
 });

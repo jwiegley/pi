@@ -614,20 +614,6 @@ function generationMatches(state: SourceStateRow, generation: SourceGeneration):
 	);
 }
 
-function lastIndexedRecordMatches(state: SourceStateRow, filePath: string): boolean {
-	if (state.last_record_offset === null || state.last_record_length === null || !state.last_record_sha256) return true;
-	const fd = openSync(filePath, "r");
-	try {
-		const bytes = Buffer.allocUnsafe(state.last_record_length);
-		return (
-			readExactSync(fd, bytes, state.last_record_offset) &&
-			digest(bytes).equals(Buffer.from(state.last_record_sha256))
-		);
-	} finally {
-		closeSync(fd);
-	}
-}
-
 function indexedPrefixMatches(state: SourceStateRow, filePath: string): boolean {
 	try {
 		const scan = scanPhysicalLines(filePath, 0, () => true, EMPTY_PREFIX_CHAIN, state.indexed_length);
@@ -661,6 +647,41 @@ function indexedDescriptorMatches(state: SourceStateRow, fd: number, filePath: s
 		return (
 			scan.indexedLength === state.indexed_length &&
 			scan.prefixChainSha256.equals(Buffer.from(state.prefix_chain_sha256))
+		);
+	} catch {
+		return false;
+	}
+}
+
+/** Re-hash the indexed prefix. Unlike isVerifiedIndexedPrefix, accept an indexed final record that has no LF yet. */
+function indexedSourceMatches(state: SourceStateRow, filePath: string): boolean {
+	const fd = openSync(filePath, "r");
+	try {
+		return indexedDescriptorMatches(state, fd, filePath);
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * Whether the descriptor still has the indexed generation and size and its last indexed record is unchanged and ends with
+ * LF. Under the source lock, an outside writer gets past this only with an equal-size edit to an earlier line that keeps
+ * the timestamps; indexIsUsable re-hashes the whole prefix at the next open.
+ */
+function indexedDescriptorUnchanged(state: SourceStateRow, fd: number): boolean {
+	// Before appending after a record without LF, append's newline repair re-derives the prefix chain from the file,
+	// which would certify an edit that this check let through.
+	if (state.final_line_terminated === 0) return false;
+	try {
+		const current = sourceDescriptorState(fd);
+		if (current.size !== state.indexed_length || !generationMatches(state, current)) return false;
+		if (state.last_record_offset === null || state.last_record_length === null || !state.last_record_sha256) {
+			return true;
+		}
+		const bytes = Buffer.allocUnsafe(state.last_record_length);
+		return (
+			readExactSync(fd, bytes, state.last_record_offset) &&
+			digest(bytes).equals(Buffer.from(state.last_record_sha256))
 		);
 	} catch {
 		return false;
@@ -1188,6 +1209,17 @@ function lastMessageForRole(messages: AgentMessage[], role?: AgentMessage["role"
 	return undefined;
 }
 
+function matchesRecentActiveFilter(
+	metadata: EntryMetadata,
+	options: Pick<RecentActiveEntriesOptions, "type" | "customType" | "messageRole">,
+): boolean {
+	return (
+		(!options.type || metadata.type === options.type) &&
+		(!options.customType || metadata.customType === options.customType) &&
+		(!options.messageRole || metadata.messageRole === options.messageRole)
+	);
+}
+
 function metadataProjectsRole(metadata: EntryMetadata, role?: AgentMessage["role"]): boolean {
 	if (role === undefined) {
 		return (
@@ -1271,6 +1303,8 @@ export class IndexedJsonlSessionHistoryStore {
 	private readonly sourceStateStatement: StatementSync;
 	private readonly messageByOrdinalStatement: StatementSync;
 	private readonly labelByTargetStatement: StatementSync;
+	private readonly entryCountStatement: StatementSync;
+	private readonly activeBranchMovedStatement: StatementSync;
 	private sourceFd: number | undefined;
 	private readonly cache: ByteLru;
 	private activeByOrdinal = new Map<number, SessionEntry>();
@@ -1281,6 +1315,14 @@ export class IndexedJsonlSessionHistoryStore {
 	private activeProjectionRetained = true;
 	private activeVisitorMetadata: EntryMetadata | undefined;
 	private activeVisitorEntry: SessionEntry | undefined;
+	/**
+	 * Frozen metadata of the branch that ends at volatileLeafId, root first, built by the first read after the leaf
+	 * jumps off it. Only push changes it in place, so a reader that holds it keeps the branch it started with.
+	 */
+	private activeBranch: EntryMetadata[] | undefined;
+	/** Every row below this ordinal was indexed when activeBranch was last checked. */
+	private activeBranchCheckedRows = 0;
+	private readonly activeBranchStrings = new Map<string, string>();
 	private evictedEntries = 0;
 	private evictedBytes = 0;
 	private volatileLeafId: string | null;
@@ -1303,6 +1345,15 @@ export class IndexedJsonlSessionHistoryStore {
 		this.sourceStateStatement = db.prepare("SELECT * FROM source_state WHERE singleton = 1");
 		this.messageByOrdinalStatement = db.prepare("SELECT * FROM entries WHERE message_ordinal = ?");
 		this.labelByTargetStatement = db.prepare("SELECT label, label_timestamp FROM current_labels WHERE target_id = ?");
+		this.entryCountStatement = db.prepare("SELECT entry_count FROM source_state WHERE singleton = 1");
+		this.activeBranchMovedStatement = db.prepare(`
+			SELECT 1 FROM entries AS later
+			WHERE later.ordinal >= ?
+			  AND (later.id = ? OR EXISTS (
+				SELECT 1 FROM entries AS earlier WHERE earlier.id = later.id AND earlier.ordinal < later.ordinal
+			  ))
+			LIMIT 1
+		`);
 		this.sourceFd = sourceFd;
 		this.header = header;
 		this.cache = new ByteLru(cacheBytes);
@@ -1468,8 +1519,10 @@ export class IndexedJsonlSessionHistoryStore {
 			if (stats.size < state.indexed_length) return false;
 			const generation = sourceGeneration(filePath);
 			if (stats.size === state.indexed_length) {
+				// Appends trust an unchanged generation, size and last record, so every open re-hashes the indexed prefix.
+				// An equal-size edit to an earlier line that keeps all three is caught here, and the index is rebuilt.
 				return generationMatches(state, generation)
-					? lastIndexedRecordMatches(state, filePath)
+					? indexedSourceMatches(state, filePath)
 					: isVerifiedIndexedPrefix(state, filePath, stats.size);
 			}
 			return isVerifiedIndexedPrefix(state, filePath, stats.size);
@@ -1947,6 +2000,14 @@ export class IndexedJsonlSessionHistoryStore {
 
 	getLatestCustomEntry(customType: string, scope: "all" | "active" = "all"): SessionEntry | undefined {
 		if (scope === "active") {
+			const branch = this.currentActiveBranch();
+			if (branch) {
+				const metadata = branch.findLast((candidate) => candidate.customType === customType);
+				if (metadata) return this.hydrate(metadata);
+				// Like the walk below, report a root whose parent is missing as a cycle.
+				if (branch[0]?.parentId) throw new Error(`Cycle in session ancestry at ${branch[0].parentId}`);
+				return undefined;
+			}
 			const maximumSteps = this.getHistorySummary().entryCount + 1;
 			let steps = 0;
 			let currentId = this.volatileLeafId;
@@ -1967,6 +2028,16 @@ export class IndexedJsonlSessionHistoryStore {
 
 	getLatestMessage(role?: string, scope: "all" | "active" = "all"): SessionEntry | undefined {
 		if (scope === "active") {
+			const branch = this.currentActiveBranch();
+			if (branch) {
+				const metadata = branch.findLast(
+					(candidate) => candidate.type === "message" && (!role || candidate.messageRole === role),
+				);
+				if (metadata) return this.hydrate(metadata);
+				// Like the walk below, report a root whose parent is missing as a cycle.
+				if (branch[0]?.parentId) throw new Error(`Cycle in session ancestry at ${branch[0].parentId}`);
+				return undefined;
+			}
 			const maximumSteps = this.getHistorySummary().entryCount + 1;
 			let steps = 0;
 			let currentId = this.volatileLeafId;
@@ -2000,6 +2071,17 @@ export class IndexedJsonlSessionHistoryStore {
 	getRecentActiveEntries(options: RecentActiveEntriesOptions = {}): SessionEntry[] {
 		const limit = Math.max(1, Math.min(options.limit ?? 256, 4096));
 		const result: SessionEntry[] = [];
+		const branch = this.currentActiveBranch();
+		if (branch) {
+			for (let index = branch.length - 1; index >= 0; index--) {
+				const metadata = branch[index]!;
+				if (metadata.id === options.stopBeforeId) break;
+				if (!matchesRecentActiveFilter(metadata, options)) continue;
+				result.push(this.hydrate(metadata));
+				if (result.length >= limit) break;
+			}
+			return result.reverse();
+		}
 		const maximumSteps = this.getHistorySummary().entryCount + 1;
 		let steps = 0;
 		let currentId = this.volatileLeafId;
@@ -2008,9 +2090,7 @@ export class IndexedJsonlSessionHistoryStore {
 			const metadata = this.getEntryMetadata(currentId);
 			if (!metadata) break;
 			currentId = metadata.parentId;
-			if (options.type && metadata.type !== options.type) continue;
-			if (options.customType && metadata.customType !== options.customType) continue;
-			if (options.messageRole && metadata.messageRole !== options.messageRole) continue;
+			if (!matchesRecentActiveFilter(metadata, options)) continue;
 			result.push(this.hydrate(metadata));
 			if (result.length >= limit) break;
 		}
@@ -2022,6 +2102,18 @@ export class IndexedJsonlSessionHistoryStore {
 		options: Omit<RecentActiveEntriesOptions, "limit">,
 		predicate: (entry: SessionEntry) => boolean,
 	): SessionEntry | undefined {
+		const branch = this.currentActiveBranch();
+		if (branch) {
+			// The store only pushes onto this array, so a predicate that appends or moves the leaf cannot disturb the walk.
+			for (let index = branch.length - 1; index >= 0; index--) {
+				const metadata = branch[index]!;
+				if (metadata.id === options.stopBeforeId) break;
+				if (!matchesRecentActiveFilter(metadata, options)) continue;
+				const entry = this.hydrate(metadata);
+				if (predicate(entry)) return entry;
+			}
+			return undefined;
+		}
 		const maximumSteps = this.getHistorySummary().entryCount + 1;
 		let steps = 0;
 		let currentId = this.volatileLeafId;
@@ -2030,9 +2122,7 @@ export class IndexedJsonlSessionHistoryStore {
 			const metadata = this.getEntryMetadata(currentId);
 			if (!metadata) break;
 			currentId = metadata.parentId;
-			if (options.type && metadata.type !== options.type) continue;
-			if (options.customType && metadata.customType !== options.customType) continue;
-			if (options.messageRole && metadata.messageRole !== options.messageRole) continue;
+			if (!matchesRecentActiveFilter(metadata, options)) continue;
 			const entry = this.hydrate(metadata);
 			if (predicate(entry)) return entry;
 		}
@@ -2147,11 +2237,94 @@ export class IndexedJsonlSessionHistoryStore {
 	}
 
 	getActiveBranchMetadata(): EntryMetadata[] {
-		return this.getBranchMetadata(this.volatileLeafId);
+		let branch = this.currentActiveBranch();
+		if (!branch) {
+			const checkedRows = this.indexedEntryCount();
+			branch = [];
+			for (const metadata of this.getBranchMetadata(this.volatileLeafId)) {
+				branch.push(this.retainActiveBranchMetadata(metadata, branch.at(-1)));
+			}
+			this.activeBranch = branch;
+			this.activeBranchCheckedRows = checkedRows;
+		}
+		return branch.slice();
+	}
+
+	private indexedEntryCount(): number {
+		return (this.entryCountStatement.get() as { entry_count: number }).entry_count;
+	}
+
+	/** activeBranch while it ends at volatileLeafId and no row indexed since its last check moves it. */
+	private currentActiveBranch(): EntryMetadata[] | undefined {
+		const branch = this.activeBranch;
+		if (!branch || (branch.at(-1)?.id ?? null) !== this.volatileLeafId) return undefined;
+		if (!this.activeBranchRowsHold(branch)) {
+			this.activeBranch = undefined;
+			return undefined;
+		}
+		// The walk counts a step for the missing parent that a root names, so once the branch holds every indexed row it
+		// throws a cycle error. Leave such a branch to the walk.
+		if (branch[0]?.parentId && branch.length >= this.activeBranchCheckedRows) return undefined;
+		return branch;
+	}
+
+	/**
+	 * The newest row for an id wins, so rows indexed since the last check move a branch only by repeating an id or by
+	 * supplying the missing parent that its root names.
+	 */
+	private activeBranchRowsHold(branch: readonly EntryMetadata[]): boolean {
+		const rows = this.indexedEntryCount();
+		if (rows === this.activeBranchCheckedRows) return true;
+		if (this.activeBranchMovedStatement.get(this.activeBranchCheckedRows, branch[0]?.parentId ?? null)) return false;
+		this.activeBranchCheckedRows = rows;
+		return true;
+	}
+
+	/** Carry activeBranch to a new leaf: extend it by a child, cut it back to an ancestor, or drop it. */
+	private followActiveBranch(leaf: EntryRow | undefined): void {
+		const branch = this.activeBranch;
+		this.activeBranch = undefined;
+		if (!branch || !this.activeBranchRowsHold(branch)) return;
+		const tailId = branch.at(-1)?.id ?? null;
+		if (!leaf) {
+			this.activeBranch = [];
+		} else if (leaf.id === tailId) {
+			this.activeBranch = branch;
+		} else if (leaf.parent_id === tailId) {
+			branch.push(this.retainActiveBranchMetadata(toMetadata(leaf), branch.at(-1)));
+			this.activeBranch = branch;
+		} else {
+			const index = branch.findLastIndex((metadata) => metadata.id === leaf.id);
+			if (index >= 0) this.activeBranch = branch.slice(0, index + 1);
+		}
+	}
+
+	/** Freeze metadata for activeBranch, sharing its parent's id and the strings that many entries repeat. */
+	private retainActiveBranchMetadata(metadata: EntryMetadata, parent: EntryMetadata | undefined): EntryMetadata {
+		const strings = this.activeBranchStrings;
+		const shared = (value: string | undefined): string | undefined => {
+			if (value === undefined) return undefined;
+			const existing = strings.get(value);
+			if (existing !== undefined) return existing;
+			strings.set(value, value);
+			return value;
+		};
+		if (parent?.id === metadata.parentId) metadata.parentId = parent.id;
+		metadata.type = shared(metadata.type)!;
+		metadata.customType = shared(metadata.customType);
+		metadata.messageRole = shared(metadata.messageRole);
+		metadata.effectiveProvider = shared(metadata.effectiveProvider);
+		metadata.effectiveModelId = shared(metadata.effectiveModelId);
+		metadata.effectiveThinkingLevel = shared(metadata.effectiveThinkingLevel)!;
+		metadata.firstKeptEntryId = shared(metadata.firstKeptEntryId);
+		metadata.nearestCompactionId = shared(metadata.nearestCompactionId);
+		return Object.freeze(metadata);
 	}
 
 	getBranch(fromId?: string): SessionEntry[] {
-		return this.getBranchMetadata(fromId ?? this.volatileLeafId).map((metadata) => this.hydrate(metadata));
+		const leafId = fromId ?? this.volatileLeafId;
+		const branch = leafId === this.volatileLeafId ? this.currentActiveBranch() : undefined;
+		return (branch ?? this.getBranchMetadata(leafId)).map((metadata) => this.hydrate(metadata));
 	}
 
 	iterateBranchEntries(fromId: string, visitor: (entry: SessionEntry, metadata: EntryMetadata) => void): void {
@@ -2448,6 +2621,7 @@ export class IndexedJsonlSessionHistoryStore {
 					.prepare("SELECT * FROM entries WHERE id = ? ORDER BY ordinal DESC LIMIT 1")
 					.get(this.volatileLeafId) as EntryRow | undefined)
 			: undefined;
+		this.followActiveBranch(leaf);
 		this.activeEntryCount = leaf?.context_count ?? 0;
 		this.activePayloadBytes = leaf?.context_payload_bytes ?? 0;
 		this.activeProjectionRetained =
@@ -2725,6 +2899,22 @@ export class IndexedJsonlSessionHistoryStore {
 	}
 
 	async iterateActiveAncestry(visitor: (metadata: EntryMetadata) => void | Promise<void>): Promise<void> {
+		const branch = this.currentActiveBranch();
+		if (branch) {
+			// The store only pushes onto this array, so a visitor that appends or moves the leaf cannot disturb the walk.
+			// Each visitor gets its own copy of the record, as from the walk below.
+			for (let index = branch.length - 1; index >= 0; index--) {
+				const metadata = { ...branch[index]! };
+				this.activeVisitorMetadata = metadata;
+				try {
+					await visitor(metadata);
+				} finally {
+					this.activeVisitorEntry = undefined;
+					this.activeVisitorMetadata = undefined;
+				}
+			}
+			return;
+		}
 		const maximumSteps = this.getHistorySummary().entryCount + 1;
 		let visited = 0;
 		let currentId = this.volatileLeafId;
@@ -2796,7 +2986,7 @@ export class IndexedJsonlSessionHistoryStore {
 			let appendVerified = false;
 			let closeFailure: { error: unknown } | undefined;
 			try {
-				if (!indexedDescriptorMatches(state, fd, this.filePath)) {
+				if (!indexedDescriptorUnchanged(state, fd) && !indexedDescriptorMatches(state, fd, this.filePath)) {
 					throw new Error("Session JSONL changed outside the indexed writer before append");
 				}
 				let size = fstatSync(fd).size;
@@ -3066,6 +3256,8 @@ export class IndexedJsonlSessionHistoryStore {
 		this.activePayloadBytes = 0;
 		this.activeVisitorMetadata = undefined;
 		this.activeVisitorEntry = undefined;
+		this.activeBranch = undefined;
+		this.activeBranchStrings.clear();
 		this.cache.clear();
 		try {
 			if (this.sourceFd !== undefined) closeSync(this.sourceFd);
