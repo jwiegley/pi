@@ -20,7 +20,7 @@ import {
 } from "../../../src/node/workers/index.ts";
 import type { Store } from "../../../src/store/index.ts";
 import { Server, Session, type WorkerBehaviour } from "../fixtures/workers/control.ts";
-import { settleFileEvents } from "../plugins/support.ts";
+import { EVENT_TEST, EVENT_WAIT, settleFileEvents } from "../plugins/support.ts";
 
 /** The fixture plugin's notes at a worker. */
 export const Notes = remote("test.notes", {
@@ -65,7 +65,7 @@ export type Fleet = {
 	readonly output: string[];
 	/** Each address's behaviour (its start data); none: a plain worker. */
 	readonly behaviours: Map<string, WorkerBehaviour>;
-	/** Writes `label` into the copy's notes plugin. */
+	/** Writes `label` into the copy's notes plugin: every watch live before the write, its events waited for after. */
 	label(label: string): Promise<void>;
 };
 
@@ -158,6 +158,9 @@ export async function fleet(
 		output,
 		behaviours,
 		label: async (label) => {
+			// On macOS a watch made shortly before the write (the watcher's, or the helper's own at its first call)
+			// restarts libuv's FSEvents stream, which can lose the write's event.
+			await settleFileEvents();
 			await writeFile(join(root, "notes", "label.ts"), `export const label = ${JSON.stringify(label)};\n`);
 			await settleFileEvents();
 		},
@@ -173,4 +176,4 @@ export async function until(ready: () => boolean, ms = 10_000): Promise<void> {
 	}
 }
 
-export { context, Server, Session };
+export { context, EVENT_TEST, EVENT_WAIT, Server, Session, settleFileEvents };

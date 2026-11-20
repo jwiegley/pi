@@ -21,7 +21,7 @@ import { AppInfo, type AppOptions } from "../../../src/node/app/index.ts";
 import { PluginWatcher } from "../../../src/node/plugins/watcher.ts";
 import { changesOf, flushed, rejection } from "../../support.ts";
 import { send } from "../http/support.ts";
-import { gitRepository, writePlugin } from "../plugins/support.ts";
+import { gitRepository, heldPipe, writePlugin } from "../plugins/support.ts";
 import {
 	ECHO_SERVER,
 	NOTES_PLUGIN,
@@ -379,7 +379,7 @@ describe("base code", () => {
 		async () => {
 			const dir = await tempDir();
 			// A file only the scan reads (Node never runs the import): a pipe, so the scan waits until it is written.
-			execFileSync("mkfifo", [join(dir, "held.mjs")]);
+			const pipe = await heldPipe(join(dir, "held.mjs"));
 			const stdout = await runStart(
 				dir,
 				['if (process.env.CHORD_TEST_NEVER === "yes") await import("./held.mjs");'],
@@ -387,7 +387,7 @@ describe("base code", () => {
 					'const owner = await fetch(new URL(started.ownerLink()).origin + "/_chord/owner");',
 					'console.log("answered", owner.status);',
 					// The pipe is fed from now on: each read of it (the scan's, the watcher's first comparison) gets the file.
-					`let feeding = true; void (async () => { while (feeding) { try { const fd = openSync(${JSON.stringify(join(dir, "held.mjs"))}, constants.O_WRONLY | constants.O_NONBLOCK); writeSync(fd, "export {};"); closeSync(fd); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); } })();`,
+					`let feeding = true; void (async () => { while (feeding) { try { const fd = openSync(${JSON.stringify(pipe)}, constants.O_WRONLY | constants.O_NONBLOCK); writeSync(fd, "export {};"); closeSync(fd); } catch {} await new Promise((resolve) => setTimeout(resolve, 10)); } })();`,
 					"await started.baseWatched;",
 					"feeding = false;",
 					'console.log("scanned");',
@@ -518,7 +518,10 @@ describe("base code", () => {
 });
 
 describe("bases built after the listen", () => {
-	/** A pipe at `path` read by a base build: fed from now on (each read gets `text`) until `stop` is called. */
+	/**
+	 * A pipe read by a base build, written through `path` (the link `heldPipe` returned): fed from now on (each read
+	 * gets `text`) until `stop` is called.
+	 */
 	function feed(path: string, text: string): { stop(): void } {
 		let feeding = true;
 		void (async () => {
@@ -550,7 +553,7 @@ describe("bases built after the listen", () => {
 		async () => {
 			const dir = await tempDir();
 			// The entry imports a pipe: its build waits until the pipe is written.
-			execFileSync("mkfifo", [join(dir, "held.ts")]);
+			const pipe = await heldPipe(join(dir, "held.ts"));
 			await writeFile(join(dir, "main.ts"), 'import "./held.ts";\nglobalThis.started = true;\n');
 			const page = (_request: unknown, assets: { readonly script: string }) => `<p>${assets.script}</p>`;
 			const { app, port } = await testApp({
@@ -564,7 +567,7 @@ describe("bases built after the listen", () => {
 				const answer = send(port, "GET", "/");
 				expect(await pending(answer)).toBe(true);
 				expect(await pending(app.basesBuilt)).toBe(true);
-				const fed = feed(join(dir, "held.ts"), "export {};");
+				const fed = feed(pipe, "export {};");
 				try {
 					const { status, body } = await answer;
 					expect([status, body.toString()]).toEqual([200, `<p>/_chord/web/base.${app.web!.base}.js</p>`]);
@@ -583,7 +586,7 @@ describe("bases built after the listen", () => {
 		"answers before a worker kind's base is built; a worker start waits for its base",
 		async () => {
 			const dir = await tempDir();
-			execFileSync("mkfifo", [join(dir, "held.ts")]);
+			const pipe = await heldPipe(join(dir, "held.ts"));
 			await writeFile(join(dir, "worker.ts"), `import "./held.ts";\nimport ${JSON.stringify(WORKER_ENTRY)};\n`);
 			const starts: string[] = [];
 			const worker = {
@@ -603,7 +606,7 @@ describe("bases built after the listen", () => {
 				expect(await pending(notes)).toBe(true);
 				// The app's start data is asked for only once the base is built.
 				expect(starts).toEqual([]);
-				const fed = feed(join(dir, "held.ts"), "export {};");
+				const fed = feed(pipe, "export {};");
 				try {
 					(await notes).release();
 					expect(starts).toEqual(["project|p1"]);
@@ -685,7 +688,7 @@ describe("bases built after the listen", () => {
 		"an aborted Apply waiting at the web step for the initial build stops there; the build goes on (Sol)",
 		async () => {
 			const dir = await tempDir();
-			execFileSync("mkfifo", [join(dir, "held.ts")]);
+			const pipe = await heldPipe(join(dir, "held.ts"));
 			await writeFile(join(dir, "main.ts"), 'import "./held.ts";\nglobalThis.started = true;\n');
 			const { app, port } = await testApp({
 				unbuilt: true,
@@ -699,7 +702,7 @@ describe("bases built after the listen", () => {
 				controller.abort(new Error("cancel Apply"));
 				const result = await applied;
 				expect([result.stopped?.step, (result.stopped?.error as Error).message]).toEqual(["web", "cancel Apply"]);
-				const fed = feed(join(dir, "held.ts"), "export {};");
+				const fed = feed(pipe, "export {};");
 				try {
 					expect((await send(port, "GET", "/")).status).toBe(200);
 					await app.baseWatched;

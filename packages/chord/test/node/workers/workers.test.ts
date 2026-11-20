@@ -25,7 +25,18 @@ import type { Workers } from "../../../src/node/workers/index.ts";
 import { constant } from "../../../src/state/index.ts";
 import { expectCollected, holdNextCommit, memoryStore } from "../../support.ts";
 import { Control, Reports } from "../fixtures/workers/control.ts";
-import { context, ENTRY, fleet, Notes, Session, type TestPrincipal, until } from "./support.ts";
+import {
+	context,
+	ENTRY,
+	EVENT_TEST,
+	EVENT_WAIT,
+	fleet,
+	Notes,
+	Session,
+	settleFileEvents,
+	type TestPrincipal,
+	until,
+} from "./support.ts";
 
 /** A step's hosts as `[host, what]`. */
 function listed(hosts: readonly RolloutHost[]) {
@@ -512,7 +523,7 @@ describe("close", () => {
 	});
 });
 
-describe("the rollout step (§4)", () => {
+describe("the rollout step (§4)", { timeout: EVENT_TEST }, () => {
 	it("ships the current set to running workers, retries held failed ones, lists each", async () => {
 		const { server, workers, plugins, label } = await fleet();
 		const one = await server.get(Notes, { id: "S1" }, context);
@@ -522,7 +533,7 @@ describe("the rollout step (§4)", () => {
 		await control.crash(1, context);
 		await until(() => stateOf(workers.state.value, "S3")?.status === "failed");
 		await label("v2");
-		await until(() => plugins.state.value.dirty.includes("@test/notes"));
+		await until(() => plugins.state.value.dirty.includes("@test/notes"), EVENT_WAIT);
 		const result = await plugins.rollout(
 			[workers.step("workers")],
 			await plugins.build(plugins.state.value.dirty, context),
@@ -544,7 +555,7 @@ describe("the rollout step (§4)", () => {
 		const one = await server.get(Notes, { id: "S1" }, context);
 		const control = await server.get(Control, { id: "S2" }, context);
 		await label("v2");
-		await until(() => plugins.state.value.dirty.includes("@test/notes"));
+		await until(() => plugins.state.value.dirty.includes("@test/notes"), EVENT_WAIT);
 		const built = await plugins.build(plugins.state.value.dirty, context);
 		// Both workers block their event loops: their reloads wait; S1 is stopped meanwhile, S2 crashes before reading it.
 		const first = await server.get(Control, { id: "S1" }, context);
@@ -568,7 +579,7 @@ describe("the rollout step (§4)", () => {
 	it("a worker starting during it gets the new set: a start after the rollout loads it", async () => {
 		const { server, workers, plugins, label } = await fleet();
 		await label("v2");
-		await until(() => plugins.state.value.dirty.includes("@test/notes"));
+		await until(() => plugins.state.value.dirty.includes("@test/notes"), EVENT_WAIT);
 		await plugins.rollout(
 			[workers.step("workers")],
 			await plugins.build(plugins.state.value.dirty, context),
@@ -584,7 +595,7 @@ describe("the rollout step (§4)", () => {
 		const control = await server.get(Control, { id: "S1" }, context);
 		const notes = await server.get(Notes, { id: "S1" }, context);
 		await label("v2");
-		await until(() => plugins.state.value.dirty.includes("@test/notes"));
+		await until(() => plugins.state.value.dirty.includes("@test/notes"), EVENT_WAIT);
 		const built = await plugins.build(plugins.state.value.dirty, context);
 		await control.block(300, context);
 		await new Promise((resolve) => setTimeout(resolve, 50));
@@ -596,7 +607,7 @@ describe("the rollout step (§4)", () => {
 		expect(listed(first.steps[0]!.hosts)).toEqual([["session|S1", "stop waiting"]]);
 		expect(plugins.state.value.dirty).toEqual(["@test/notes"]);
 		await label("v3");
-		await until(() => plugins.state.value.dirty.includes("@test/notes"));
+		await until(() => plugins.state.value.dirty.includes("@test/notes"), EVENT_WAIT);
 		const next = await plugins.rollout([step], await plugins.build(plugins.state.value.dirty, context), context);
 		expect(listed(next.steps[0]!.hosts)).toEqual([
 			["session|S1", { added: [], changed: ["@test/notes"], removed: [] }],
@@ -701,7 +712,7 @@ describe("fix round 2", () => {
 	});
 });
 
-describe("fix round 1", () => {
+describe("fix round 1", { timeout: EVENT_TEST }, () => {
 	it("close during a forked start that never connects returns at once, no failure (Opus F1)", async () => {
 		const { server, workers, behaviours, errors } = await fleet();
 		behaviours.set("S1", { connect: false });
@@ -719,7 +730,9 @@ describe("fix round 1", () => {
 		const { server, workers, errors } = await fleet({ start: () => new Promise<never>(() => {}) });
 		const notes = server.hold(Notes, { id: "S1" }, context);
 		await new Promise((resolve) => setTimeout(resolve, 50));
+		const started = Date.now();
 		await workers.close(context);
+		expect(Date.now() - started).toBeLessThan(5_000);
 		forked = stateOf(workers.state.value, "S1") !== undefined;
 		expect([forked, errors]).toEqual([false, []]);
 		notes.release();
@@ -731,8 +744,11 @@ describe("fix round 1", () => {
 		behaviours.set("S1", { loadMs: 5_000, closeMs: 200, log: join(dir, "log") });
 		const notes = server.hold(Notes, { id: "S1" }, context);
 		await until(() => stateOf(workers.state.value, "S1") !== undefined);
+		const starting = Date.now();
 		await new Promise((resolve) => setTimeout(resolve, 300));
 		await workers.stop(Session({ id: "S1" }), context);
+		// Before the worker's 5 s load could have ended: the stop did not wait for it.
+		expect(Date.now() - starting).toBeLessThan(5_000);
 		expect(errors).toEqual([]);
 		expect(await readFile(join(dir, "log"), "utf8")).toBe("store\nhost\n");
 		notes.release();
@@ -743,14 +759,17 @@ describe("fix round 1", () => {
 		const { server, workers, plugins, label } = await fleet();
 		const control = await server.get(Control, { id: "S1" }, context);
 		await label("v2");
-		await until(() => plugins.state.value.dirty.length > 0);
+		await until(() => plugins.state.value.dirty.length > 0, EVENT_WAIT);
 		const built = await plugins.build(plugins.state.value.dirty, context);
+		const started = Date.now();
 		await control.blockThenCrash(600, context);
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		const first = plugins.rollout([workers.step("one")], built, context);
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		const second = plugins.rollout([workers.step("two")], built, context);
 		const outcomes = await Promise.all([first, second]);
+		// Both settled at the child's crash, well within the suite's timeout (EVENT_TEST, for the label's file events).
+		expect(Date.now() - started).toBeLessThan(5_000);
 		expect(outcomes.map((result) => listed(result.steps[0]!.hosts))).toEqual([
 			[["session|S1", "worker: its link is gone"]],
 			[["session|S1", "worker: its link is gone"]],
@@ -761,11 +780,13 @@ describe("fix round 1", () => {
 	it("a plugin whose evaluation failed is shipped again by the next rollout and stays dirty (Astra)", async () => {
 		const { server, workers, plugins, root } = await fleet();
 		const notes = await server.get(Notes, { id: "S1" }, context);
+		// Every watch live before the write, as in label().
+		await settleFileEvents();
 		await writeFile(
 			join(root, "notes", "label.ts"),
 			'throw new Error("evaluation failed");\nexport const label = "v2";\n',
 		);
-		await until(() => plugins.state.value.dirty.length > 0);
+		await until(() => plugins.state.value.dirty.length > 0, EVENT_WAIT);
 		const built = await plugins.build(plugins.state.value.dirty, context);
 		const failed = (result: { steps: readonly { hosts: readonly RolloutHost[] }[] }) => {
 			const [entry] = result.steps[0]!.hosts;
