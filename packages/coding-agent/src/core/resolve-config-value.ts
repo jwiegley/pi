@@ -131,6 +131,11 @@ export function isCommandConfigValue(config: string): boolean {
 	return parseConfigValueReference(config).type === "command";
 }
 
+/** A config value that resolves to exactly `value`: every `$` and `!` escaped, so nothing expands or runs. */
+export function escapeConfigValue(value: string): string {
+	return value.replace(/[$!]/g, (character) => `$${character}`);
+}
+
 export function isConfigValueConfigured(config: string, env?: Record<string, string>): boolean {
 	return getMissingConfigValueEnvVarNames(config, env).length === 0;
 }

@@ -12,9 +12,18 @@ import { getAgentDir } from "../config.ts";
 import { raceWithAbortSignal } from "../utils/abort.ts";
 import { getFileRevision, normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
-import { isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
+import { escapeConfigValue, isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
 
 type AuthStorageData = Record<string, Credential>;
+
+/**
+ * `credential` as auth.json stores it. A credential's API key is the key itself, but auth.json keys are config values
+ * (`read` expands `$NAME` and runs a leading `!`), so the stored key is escaped to resolve to exactly that key.
+ */
+function storedCredential(credential: Credential): Credential {
+	if (credential.type !== "api_key" || credential.key === undefined) return credential;
+	return { ...credential, key: escapeConfigValue(credential.key) };
+}
 
 // On Windows, a just-removed lock directory can stay "delete pending" while another process
 // (antivirus, indexer, another pi checking the lock) still has it open. mkdir then fails with
@@ -464,7 +473,7 @@ export class AuthStorage implements CredentialStore {
 				return { result: currentData[provider] };
 			}
 
-			const merged: AuthStorageData = { ...currentData, [provider]: next };
+			const merged: AuthStorageData = { ...currentData, [provider]: storedCredential(next) };
 			latestData = merged;
 			return { result: next, next: JSON.stringify(merged, null, 2) };
 		}, options);

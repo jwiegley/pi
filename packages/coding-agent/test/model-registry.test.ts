@@ -1268,15 +1268,18 @@ describe("ModelRegistry", () => {
 		});
 
 		test("stored API key env propagates to request auth and resolves headers", async () => {
-			await authStorage.modify("cloudflare-ai-gateway", async () => ({
-				type: "api_key",
-				key: "$CLOUDFLARE_API_KEY",
-				env: {
-					CLOUDFLARE_API_KEY: "stored-cf-token",
-					CLOUDFLARE_ACCOUNT_ID: "stored-account",
-					CLOUDFLARE_GATEWAY_ID: "stored-gateway",
+			// An auth.json entry whose key names its own env; modify would store the key as a literal.
+			authStorage = AuthStorage.inMemory({
+				"cloudflare-ai-gateway": {
+					type: "api_key",
+					key: "$CLOUDFLARE_API_KEY",
+					env: {
+						CLOUDFLARE_API_KEY: "stored-cf-token",
+						CLOUDFLARE_ACCOUNT_ID: "stored-account",
+						CLOUDFLARE_GATEWAY_ID: "stored-gateway",
+					},
 				},
-			}));
+			});
 			writeRawModelsJson({
 				"cloudflare-ai-gateway": {
 					headers: { "x-account": "$CLOUDFLARE_ACCOUNT_ID" },

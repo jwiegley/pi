@@ -6686,6 +6686,8 @@ export class InteractiveMode {
 			response = this.showAuthSelect(dialog, prompt, providerId);
 		} else if (prompt.type === "manual_code") {
 			response = dialog.showManualInput(prompt.message);
+		} else if (prompt.type === "secret") {
+			response = dialog.showSecretPrompt(prompt.message, prompt.placeholder);
 		} else {
 			response = dialog.showPrompt(prompt.message, prompt.placeholder);
 		}

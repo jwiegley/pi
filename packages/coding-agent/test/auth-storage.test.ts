@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type CredentialStore, createModels, type Provider } from "@earendil-works/pi-ai";
+import { type CredentialStore, createModels, envApiKeyAuth, type Provider } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.ts";
@@ -651,5 +651,83 @@ describe("AuthStorage", () => {
 		writeFileSync(authJsonPath, "{invalid-json", "utf8");
 		await expect(storage.modify("openai", async () => ({ type: "api_key", key: "new" }))).rejects.toThrow();
 		expect(readFileSync(authJsonPath, "utf8")).toBe("{invalid-json");
+	});
+
+	describe("API keys stored by login", () => {
+		const providerId = "literal-provider";
+
+		function literalProvider(): Provider {
+			return {
+				id: providerId,
+				name: "Literal Provider",
+				auth: { apiKey: envApiKeyAuth("Literal Provider API key", []) },
+				getModels: () => [],
+				stream: () => {
+					throw new Error("not used");
+				},
+				streamSimple: () => {
+					throw new Error("not used");
+				},
+			};
+		}
+
+		/** Store `key` through API-key login, as `/login` does, and return what a later Pi reads back. */
+		async function loginWith(key: string): Promise<string | undefined> {
+			const models = createModels({ credentials: AuthStorage.create(authJsonPath) });
+			models.setProvider(literalProvider());
+			await models.login(providerId, "api_key", { prompt: async () => key, notify: () => {} });
+			const later = createModels({ credentials: AuthStorage.create(authJsonPath) });
+			later.setProvider(literalProvider());
+			return (await later.getAuth(providerId))?.auth.apiKey;
+		}
+
+		test.each([
+			["an env reference", "sk-$PI_TEST_LITERAL_KEY"],
+			["a braced env reference", `sk-\${PI_TEST_LITERAL_KEY}-x`],
+			["an unset env reference", "abc$defGHI"],
+			["an escaped dollar", "sk-a$$b"],
+			["an escaped bang", "sk-a$!b"],
+		])("reads back a key with %s exactly", async (_name, key) => {
+			vi.stubEnv("PI_TEST_LITERAL_KEY", "expanded");
+			writeAuthJson({});
+			expect(await loginWith(key)).toBe(key);
+		});
+
+		test("never runs a key that starts with !", async () => {
+			const marker = join(tempDir, "ran");
+			const key = `!touch ${marker}`;
+			writeAuthJson({});
+			expect(await loginWith(key)).toBe(key);
+			expect(existsSync(marker)).toBe(false);
+		});
+
+		test("stores every $ and ! escaped, so any Pi reads the key back exactly", async () => {
+			writeAuthJson({});
+			await loginWith("a$b!c");
+			expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual({
+				[providerId]: { type: "api_key", key: "a$$b$!c" },
+			});
+		});
+
+		test("reads keys stored raw by earlier logins as before", async () => {
+			vi.stubEnv("PI_TEST_LITERAL_KEY", "expanded");
+			writeAuthJson({
+				openrouter: { type: "api_key", key: "sk-or-v1-0123456789abcdef" },
+				expanding: { type: "api_key", key: "sk-$PI_TEST_LITERAL_KEY" },
+				command: { type: "api_key", key: "!printf 'command-key'" },
+			});
+			const storage = AuthStorage.create(authJsonPath);
+			expect(await storage.read("openrouter")).toEqual({ type: "api_key", key: "sk-or-v1-0123456789abcdef" });
+			expect(await storage.read("expanding")).toEqual({ type: "api_key", key: "sk-expanded" });
+			expect(await storage.read("command")).toEqual({ type: "api_key", key: "command-key" });
+		});
+
+		test("reads keys stored escaped by earlier tools as before", async () => {
+			// Escaped by hand or by a tool, as resolveConfigValue documents, before login escaped keys itself.
+			const key = "sk-$PI_TEST_LITERAL_KEY!$$x";
+			writeAuthJson({ escaped: { type: "api_key", key: key.replace(/[$!]/g, (character) => `$${character}`) } });
+			vi.stubEnv("PI_TEST_LITERAL_KEY", "expanded");
+			expect(await AuthStorage.create(authJsonPath).read("escaped")).toEqual({ type: "api_key", key });
+		});
 	});
 });

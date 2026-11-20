@@ -387,6 +387,14 @@ describe("pi auth login", () => {
 		expect(terminal.lines.some((line) => line.startsWith("Saved API key for Login Test."))).toBe(true);
 	});
 
+	test("--api-key saves the key as entered, never expanded or run", async () => {
+		const { credentials, modelRuntime } = await setup(bothMethods);
+		const key = "sk-$HOME!x";
+		const terminal = scriptedTerminal([key]);
+		expect(await run([PROVIDER_ID, "--api-key"], modelRuntime, terminal)).toBe(0);
+		expect(await credentials.read(PROVIDER_ID)).toMatchObject({ type: "api_key", key });
+	});
+
 	test("uses the API key login of providers without account sign-in", async () => {
 		const { modelRuntime } = await setup({ apiKey: bothMethods.apiKey });
 		const terminal = scriptedTerminal(["sk-test"]);

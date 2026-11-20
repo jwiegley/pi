@@ -24,6 +24,8 @@ export interface InputOptions {
 	prompt?: string;
 	placeholder?: string;
 	placeholderStyle?: (text: string) => string;
+	/** Text drawn in place of each grapheme of the value, such as `*`, so a secret never reaches the screen. */
+	mask?: string;
 }
 
 /**
@@ -35,6 +37,7 @@ export class Input implements Component, Focusable {
 	private readonly prompt: string;
 	private readonly placeholder: string;
 	private readonly placeholderStyle: (text: string) => string;
+	private readonly mask: string | undefined;
 	private renderedStartColumn = 0;
 	public onSubmit?: (value: string) => void;
 	public onEscape?: () => void;
@@ -57,6 +60,7 @@ export class Input implements Component, Focusable {
 		this.prompt = options.prompt ?? "> ";
 		this.placeholder = options.placeholder ?? "";
 		this.placeholderStyle = options.placeholderStyle ?? ((text) => text);
+		this.mask = options.mask;
 	}
 
 	getValue(): string {
@@ -240,7 +244,7 @@ export class Input implements Component, Focusable {
 		let currentColumn = 0;
 		this.cursor = this.value.length;
 		for (const grapheme of segmenter.segment(this.value)) {
-			const nextColumn = currentColumn + visibleWidth(grapheme.segment);
+			const nextColumn = currentColumn + visibleWidth(this.mask ?? grapheme.segment);
 			if (targetColumn < nextColumn) {
 				this.cursor = grapheme.index;
 				break;
@@ -388,16 +392,17 @@ export class Input implements Component, Focusable {
 		this.lastAction = null;
 	}
 
+	// A masked value is one word: stopping at its word boundaries would show where its separators are.
 	private moveWordBackwards(): void {
 		if (this.cursor === 0) return;
 		this.lastAction = null;
-		this.cursor = findWordBackward(this.value, this.cursor);
+		this.cursor = this.mask === undefined ? findWordBackward(this.value, this.cursor) : 0;
 	}
 
 	private moveWordForwards(): void {
 		if (this.cursor >= this.value.length) return;
 		this.lastAction = null;
-		this.cursor = findWordForward(this.value, this.cursor);
+		this.cursor = this.mask === undefined ? findWordForward(this.value, this.cursor) : this.value.length;
 	}
 
 	private handlePaste(pastedText: string): void {
@@ -436,19 +441,20 @@ export class Input implements Component, Focusable {
 			return [this.prompt + textWithCursor + padding];
 		}
 
+		const { value, cursor } = this.displayed();
 		let visibleText = "";
-		let cursorDisplay = this.cursor;
+		let cursorDisplay = cursor;
 		this.renderedStartColumn = 0;
-		const totalWidth = visibleWidth(this.value);
+		const totalWidth = visibleWidth(value);
 
 		if (totalWidth < availableWidth) {
 			// Everything fits (leave room for cursor at end)
-			visibleText = this.value;
+			visibleText = value;
 		} else {
 			// Need horizontal scrolling
 			// Reserve one column for cursor if it's at the end
-			const scrollWidth = this.cursor === this.value.length ? availableWidth - 1 : availableWidth;
-			const cursorCol = visibleWidth(this.value.slice(0, this.cursor));
+			const scrollWidth = cursor === value.length ? availableWidth - 1 : availableWidth;
+			const cursorCol = visibleWidth(value.slice(0, cursor));
 
 			if (scrollWidth > 0) {
 				const halfWidth = Math.floor(scrollWidth / 2);
@@ -466,8 +472,8 @@ export class Input implements Component, Focusable {
 				}
 
 				this.renderedStartColumn = startCol;
-				visibleText = sliceByColumn(this.value, startCol, scrollWidth, true);
-				const beforeCursor = sliceByColumn(this.value, startCol, Math.max(0, cursorCol - startCol), true);
+				visibleText = sliceByColumn(value, startCol, scrollWidth, true);
+				const beforeCursor = sliceByColumn(value, startCol, Math.max(0, cursorCol - startCol), true);
 				cursorDisplay = beforeCursor.length;
 			} else {
 				visibleText = "";
@@ -497,5 +503,17 @@ export class Input implements Component, Focusable {
 		const line = this.prompt + textWithCursor + padding;
 
 		return [line];
+	}
+
+	/** The value as drawn and the cursor's index in it: with a mask, the mask once per grapheme. */
+	private displayed(): InputState {
+		if (this.mask === undefined) return { value: this.value, cursor: this.cursor };
+		let value = "";
+		let cursor = 0;
+		for (const { index } of segmenter.segment(this.value)) {
+			if (index < this.cursor) cursor += this.mask.length;
+			value += this.mask;
+		}
+		return { value, cursor };
 	}
 }
