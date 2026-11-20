@@ -181,6 +181,7 @@ function applyModelOverride(model: Model<Api>, override: ModelsJsonModelOverride
 		...model,
 		name: override.name ?? model.name,
 		reasoning: override.reasoning ?? model.reasoning,
+		defaultThinkingLevel: override.defaultThinkingLevel ?? model.defaultThinkingLevel,
 		thinkingLevelMap: override.thinkingLevelMap
 			? { ...model.thinkingLevelMap, ...override.thinkingLevelMap }
 			: model.thinkingLevelMap,
@@ -236,6 +237,7 @@ function modelFromJson(
 		provider: providerId,
 		baseUrl,
 		reasoning: definition.reasoning ?? false,
+		defaultThinkingLevel: definition.defaultThinkingLevel,
 		thinkingLevelMap: definition.thinkingLevelMap,
 		input: (definition.input ?? ["text"]) as ("text" | "image")[],
 		inputLimits: definition.inputLimits,
@@ -314,13 +316,14 @@ function applyModelsJson(
 		!config.baseUrl &&
 		!config.headers &&
 		!config.compat &&
+		!config.transport &&
 		!hasOverrides &&
 		!config.apiKey &&
 		!config.oauth &&
 		config.authHeader === undefined
 	) {
 		throw new Error(
-			`Provider ${providerId}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".`,
+			`Provider ${providerId}: must specify "baseUrl", "headers", "compat", "transport", "modelOverrides", or "models".`,
 		);
 	}
 
