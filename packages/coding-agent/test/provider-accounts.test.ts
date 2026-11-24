@@ -126,6 +126,7 @@ describe("provider accounts", () => {
 		expect(ids).not.toContain("service");
 		expect(runtime.getModel("service", "m1")).toBeUndefined();
 		expect(runtime.getModel("service-j", "m1")).toMatchObject({ provider: "service-j", id: "m1" });
+		expect(runtime.getProvider("service-j")?.accountOf).toBe("service");
 		expect(runtime.getProvider("service-j")?.name).toBe("Service (John)");
 		expect(runtime.getProvider("service-p")?.name).toBe("Service (service-p)");
 		expect(runtime.getError()).toBeUndefined();

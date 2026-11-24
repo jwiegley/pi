@@ -221,6 +221,13 @@ export interface Provider<TApi extends Api = Api> {
 	): readonly ProviderModel<TApi>[];
 
 	/**
+	 * Set on a provider that is another account of the provider with this id: the same service,
+	 * models and request behavior, with its own credential. Code that acts on a service by its
+	 * provider id compares `accountOf ?? id`.
+	 */
+	readonly accountOf?: string;
+
+	/**
 	 * A provider with state of its own for another account of this one: its model list and whatever
 	 * else it keeps per login. `env` is that account's provider-scoped environment, for work done
 	 * outside a request, such as model discovery. A provider that omits it is shared by its accounts.

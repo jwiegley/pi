@@ -74,6 +74,7 @@ export function accountProvider(account: ProviderAccount, base: Provider): Provi
 		base;
 	const provider: Provider = {
 		id: account.id,
+		accountOf: base.id,
 		name: account.name ?? `${base.name} (${account.id})`,
 		baseUrl: base.baseUrl,
 		headers: base.headers,

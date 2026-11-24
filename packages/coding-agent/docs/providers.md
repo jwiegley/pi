@@ -124,6 +124,8 @@ To rename an account, list its earlier IDs in `aliases`. Sessions and model refe
 }
 ```
 
+Extensions see an account as a provider whose `accountOf` is the provider's ID, so code that acts on a service compares `provider.accountOf ?? provider.id`.
+
 Credentials do not follow a rename. Move the entry in `auth.json` to the new ID, or sign in again.
 
 ## Provider Specific Config
