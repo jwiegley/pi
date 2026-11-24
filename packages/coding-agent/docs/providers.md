@@ -87,6 +87,45 @@ Pi runs the command when the key is first needed and caches its standard output 
 
 A stored `key` can also name environment variables as `$NAME` or `${NAME}`; write `$$` for a literal `$` and `$!` for a literal `!`. `/login` and `pi auth login --api-key` store the key you enter escaped this way, so it is never expanded or run as a command.
 
+## Use several accounts of one provider
+
+Pi stores one credential per provider ID, so a second account of a provider needs its own ID. Declare each account in `~/.pi/agent/models.json` with `accountOf`:
+
+```json
+{
+  "providers": {
+    "openrouter-j": { "accountOf": "openrouter", "name": "OpenRouter (personal)" },
+    "openrouter-p": { "accountOf": "openrouter", "name": "OpenRouter (work)" }
+  }
+}
+```
+
+Each account has the provider's models, sign-in and request behavior, and its own credential: sign in with `/login openrouter-p`, and select a model as `openrouter-p/<model>`. This works for built-in providers and for providers an extension registers.
+
+A provider that has accounts is reachable only through them. `openrouter/<model>` then names no provider, so no request can go to an account you did not name. Settings for the provider, such as `baseUrl`, `compat`, and `modelOverrides`, stay under its own ID and apply to all of its accounts.
+
+An account ignores provider environment variables such as `OPENROUTER_API_KEY`, and an `apiKey` configured for the provider: either would sign in every account at once. Use a stored credential, or give the account its own variables with `env`:
+
+```json
+{
+  "providers": {
+    "google-p": { "accountOf": "google", "env": { "GEMINI_API_KEY": "..." } }
+  }
+}
+```
+
+To rename an account, list its earlier IDs in `aliases`. Sessions and model references that name an earlier ID resolve to the account, and no list shows the earlier ID:
+
+```json
+{
+  "providers": {
+    "openai-codex-p": { "accountOf": "openai-codex", "aliases": ["openai-codex-3"] }
+  }
+}
+```
+
+Credentials do not follow a rename. Move the entry in `auth.json` to the new ID, or sign in again.
+
 ## Provider Specific Config
 
 The providers below have additional setup, need additional settings, or can use credentials supplied by their platform.

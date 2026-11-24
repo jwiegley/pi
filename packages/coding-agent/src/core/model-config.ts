@@ -16,6 +16,7 @@ import {
 	ProviderCompatSchema,
 	ThinkingLevelMapSchema,
 } from "./pi-ai-schemas.ts";
+import { accountsProblem, type ProviderAccount } from "./provider-accounts.ts";
 
 const SamplingParamsSchema = Type.Record(Type.String(), Type.Unknown());
 const SamplingParamsByThinkingLevelSchema = Type.Object(
@@ -140,6 +141,25 @@ const ProviderConfigSchema = Type.Object({
 	transport: Type.Optional(ProviderTransportSchema),
 	models: Type.Optional(Type.Array(ModelDefinitionSchema)),
 	modelOverrides: Type.Optional(Type.Record(Type.String(), ModelOverrideSchema)),
+	accountOf: Type.Optional(
+		Type.String({
+			minLength: 1,
+			description:
+				"Makes this provider another account of the named provider: the same models, login and requests, with its own credential. The named provider is then reachable only through its accounts.",
+		}),
+	),
+	aliases: Type.Optional(
+		Type.Array(Type.String({ minLength: 1 }), {
+			description:
+				"Earlier provider IDs of this account. Sessions and model references that name one resolve to this account; no list shows them. Requires accountOf.",
+		}),
+	),
+	env: Type.Optional(
+		Type.Record(Type.String(), Type.String(), {
+			description:
+				"The only environment variables the provider's authentication sees for this account, as literal values. Requires accountOf.",
+		}),
+	),
 });
 
 const ModelsConfigProperties = {
@@ -186,11 +206,27 @@ function deepFreeze<T>(value: T): T {
 /** One immutable load of models.json. */
 export class ModelConfig {
 	private readonly providers: ReadonlyMap<string, ModelsJsonProvider>;
+	private readonly accounts = new Map<string, ProviderAccount>();
+	private readonly accountsByBase = new Map<string, ProviderAccount[]>();
+	private readonly aliases = new Map<string, string>();
 	private readonly error: string | undefined;
 
 	private constructor(providers: ReadonlyMap<string, ModelsJsonProvider>, error?: string) {
 		this.providers = providers;
 		this.error = error;
+		for (const [id, provider] of providers) {
+			if (provider.accountOf === undefined) continue;
+			const account: ProviderAccount = {
+				id,
+				accountOf: provider.accountOf,
+				name: provider.name,
+				aliases: provider.aliases ?? [],
+				env: provider.env ?? {},
+			};
+			this.accounts.set(id, account);
+			this.accountsByBase.set(account.accountOf, [...(this.accountsByBase.get(account.accountOf) ?? []), account]);
+			for (const alias of account.aliases) this.aliases.set(alias, id);
+		}
 	}
 
 	static async load(modelsJsonPath: string | undefined): Promise<ModelConfig> {
@@ -230,11 +266,28 @@ export class ModelConfig {
 		for (const [providerId, provider] of Object.entries(parsed.providers)) {
 			providers.set(providerId, deepFreeze(structuredClone(provider)));
 		}
+		const problem = accountsProblem(providers);
+		if (problem) return new ModelConfig(new Map(), `Invalid models.json accounts:\n  - ${problem}\n\nFile: ${path}`);
 		return new ModelConfig(providers);
 	}
 
 	getProvider(providerId: string): ModelsJsonProvider | undefined {
 		return this.providers.get(providerId);
+	}
+
+	/** The account a provider ID declares, if it is one. */
+	getAccount(providerId: string): ProviderAccount | undefined {
+		return this.accounts.get(providerId);
+	}
+
+	/** The accounts of a provider. A provider with any is reachable only through them. */
+	getAccountsOf(providerId: string): readonly ProviderAccount[] {
+		return this.accountsByBase.get(providerId) ?? [];
+	}
+
+	/** The account an earlier provider ID now names, or the ID itself. */
+	resolveAlias(providerId: string): string {
+		return this.aliases.get(providerId) ?? providerId;
 	}
 
 	getProviderIds(): readonly string[] {

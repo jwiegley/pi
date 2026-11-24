@@ -25,6 +25,9 @@ Each key under `providers` is a provider ID. A built-in provider ID changes that
 | `transport.idleTimeoutMs` | integer |  | HTTP idle timeout in milliseconds; 0 disables it. Applies only where the API adapter uses Pi's fetch: Bedrock and WebSocket transports ignore it. |
 | `models` | [`object[]`](#models) |  |  |
 | `modelOverrides` | [object](#model-overrides) |  |  |
+| `accountOf` | string |  | Makes this provider another account of the named provider: the same models, login and requests, with its own credential. The named provider is then reachable only through its accounts. |
+| `aliases` | `string[]` |  | Earlier provider IDs of this account. Sessions and model references that name one resolve to this account; no list shows them. Requires accountOf. |
+| `env` | object |  | The only environment variables the provider's authentication sees for this account, as literal values. Requires accountOf. |
 
 ## Models
 

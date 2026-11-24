@@ -220,6 +220,13 @@ export interface Provider<TApi extends Api = Api> {
 		credential: Credential | undefined,
 	): readonly ProviderModel<TApi>[];
 
+	/**
+	 * A provider with state of its own for another account of this one: its model list and whatever
+	 * else it keeps per login. `env` is that account's provider-scoped environment, for work done
+	 * outside a request, such as model discovery. A provider that omits it is shared by its accounts.
+	 */
+	forAccount?(env: Readonly<Record<string, string>>): Provider<TApi>;
+
 	/** Stream a normalized transcript. `Models` normalizes the caller's `Context` before dispatching here. */
 	stream<T extends TApi>(
 		model: Model<T>,

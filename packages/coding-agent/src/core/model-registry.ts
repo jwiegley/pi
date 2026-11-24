@@ -122,7 +122,7 @@ export class ModelRegistry {
 	}
 
 	getProvider(provider: string): Provider | undefined {
-		return this.runtime.getProvider(provider);
+		return this.runtime.getProvider(provider) ?? this.runtime.getAccountBase(provider);
 	}
 
 	/** Stream through the configured provider with request-time authentication. */

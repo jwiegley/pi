@@ -73,6 +73,7 @@ import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
 import { createHttpIdleTimeoutFetch } from "./http-dispatcher.ts";
 import { ModelConfig } from "./model-config.ts";
 import { FileModelsStore, InMemoryCodingAgentModelsStore } from "./models-store.ts";
+import { accountProvider, type ProviderAccount } from "./provider-accounts.ts";
 import {
 	type AuthStatus,
 	type CompatibilityRequestConfig,
@@ -175,8 +176,11 @@ function mergeHeaders(
 export class ModelRuntime implements Models {
 	private readonly models: MutableModels;
 	private readonly credentials: RuntimeCredentials;
+	private readonly createBuiltins: () => readonly Provider[];
 	private readonly defaultBuiltins: ReadonlyMap<string, Provider>;
 	private readonly builtins = new Map<string, Provider>();
+	/** Each account's own instance of its provider, which keeps a model list per login, and the provider it came from. */
+	private readonly accountInstances = new Map<string, { source: Provider; instance: Provider }>();
 	private readonly nativeExtensionProviders = new Map<string, Provider>();
 	private readonly extensionProviders = new Map<string, ProviderConfigInput>();
 	/** Virtual models by provider id, then model id. */
@@ -203,14 +207,15 @@ export class ModelRuntime implements Models {
 		config: ModelConfig,
 		modelsPath: string | undefined,
 		modelsStore: ModelsStore,
-		providers: readonly Provider[],
+		createBuiltins: () => readonly Provider[],
 		modelNetworkEnabled: boolean,
 	) {
 		this.credentials = credentials;
 		this.config = config;
 		this.modelsPath = modelsPath;
 		this.modelNetworkEnabled = modelNetworkEnabled;
-		this.defaultBuiltins = new Map(providers.map((provider) => [provider.id, provider]));
+		this.createBuiltins = createBuiltins;
+		this.defaultBuiltins = new Map(createBuiltins().map((provider) => [provider.id, provider]));
 		for (const [providerId, provider] of this.defaultBuiltins) this.builtins.set(providerId, provider);
 		this.models = createModels({ credentials, modelsStore });
 		this.rebuildProviders();
@@ -227,25 +232,26 @@ export class ModelRuntime implements Models {
 				? new FileModelsStore(options.modelsStorePath ?? join(dirname(modelsPath), "models-store.json"))
 				: new InMemoryCodingAgentModelsStore());
 		const builtinModelDataGeneratedAt = builtinProviderCatalog.getBuiltinModelDataGeneratedAt();
-		const providers = builtinProviderCatalog.builtinProviders().map((provider) => {
-			if (provider.id === "radius") return provider;
-			// OpenRouter narrows the catalog to the models, limits and prices of the user's key.
-			if (provider.id === "openrouter") {
-				return withPersonalizedCatalog(
-					provider,
-					personalizeOpenRouterCatalog,
-					options.catalogBaseUrl,
-					builtinModelDataGeneratedAt,
-				);
-			}
-			return withRemoteCatalog(provider, options.catalogBaseUrl, builtinModelDataGeneratedAt);
-		});
+		const createBuiltins = () =>
+			builtinProviderCatalog.builtinProviders().map((provider) => {
+				if (provider.id === "radius") return provider;
+				// OpenRouter narrows the catalog to the models, limits and prices of the user's key.
+				if (provider.id === "openrouter") {
+					return withPersonalizedCatalog(
+						provider,
+						personalizeOpenRouterCatalog,
+						options.catalogBaseUrl,
+						builtinModelDataGeneratedAt,
+					);
+				}
+				return withRemoteCatalog(provider, options.catalogBaseUrl, builtinModelDataGeneratedAt);
+			});
 		const runtime = new ModelRuntime(
 			credentials,
 			config,
 			modelsPath,
 			modelsStore,
-			providers,
+			createBuiltins,
 			process.env.PI_OFFLINE === undefined,
 		);
 		runtime.configureRadiusProviders();
@@ -296,8 +302,17 @@ export class ModelRuntime implements Models {
 		]);
 	}
 
-	/** Returns the provider without virtual models, or undefined when only virtual models define it. */
+	/**
+	 * Returns the provider without virtual models, or undefined when only virtual models define it.
+	 * Accounts follow their provider, so a provider an extension registers late reaches them.
+	 */
 	private recomposeProvider(providerId: string): Provider | undefined {
+		const provider = this.publishProvider(providerId);
+		for (const account of this.config.getAccountsOf(providerId)) this.publishProvider(account.id);
+		return provider;
+	}
+
+	private publishProvider(providerId: string): Provider | undefined {
 		const provider = this.composeProvider(providerId);
 		const virtualModels = [...(this.virtualModels.get(providerId)?.values() ?? [])].map((entry) => entry.model);
 		if (virtualModels.length > 0) this.models.setProvider(withVirtualModels(providerId, provider, virtualModels));
@@ -308,7 +323,42 @@ export class ModelRuntime implements Models {
 
 	/** The provider without virtual models, or undefined when nothing defines it. */
 	private composeProvider(providerId: string): Provider | undefined {
-		const base = this.nativeExtensionProviders.get(providerId) ?? this.builtins.get(providerId);
+		// A provider with accounts is reachable only through them: its bare id names no account.
+		if (this.config.getAccountsOf(providerId).length > 0) return undefined;
+		const account = this.config.getAccount(providerId);
+		if (account) {
+			// No base yet is not an error: an extension may still register it.
+			const base = this.composeLayers(account.accountOf, this.accountInstance(account));
+			return base && accountProvider(account, base);
+		}
+		return this.composeLayers(providerId, this.registeredBase(providerId));
+	}
+
+	private registeredBase(providerId: string): Provider | undefined {
+		return this.nativeExtensionProviders.get(providerId) ?? this.builtins.get(providerId);
+	}
+
+	/**
+	 * An account's own instance of its provider, kept while models.json declares the account and the
+	 * provider is the same object. Providers without a factory are shared by their accounts.
+	 */
+	private accountInstance(account: ProviderAccount): Provider | undefined {
+		const source = this.registeredBase(account.accountOf);
+		if (!source) return undefined;
+		const kept = this.accountInstances.get(account.id);
+		if (kept?.source === source) return kept.instance;
+		const instance =
+			source.forAccount?.(account.env) ??
+			(source === this.defaultBuiltins.get(source.id)
+				? this.createBuiltins().find((provider) => provider.id === source.id)
+				: undefined) ??
+			source;
+		this.accountInstances.set(account.id, { source, instance });
+		return instance;
+	}
+
+	/** The config layers of `providerId` over `base`. */
+	private composeLayers(providerId: string, base: Provider | undefined): Provider | undefined {
 		const extension = this.extensionProviders.get(providerId);
 		if (!this.config.getProvider(providerId) && !extension) {
 			// No overlays: use the builtin untouched so its auth/login/stream behavior is exact.
@@ -328,7 +378,10 @@ export class ModelRuntime implements Models {
 	private rebuildProviders(): void {
 		this.models.clearProviders();
 		this.compositionErrors.clear();
-		for (const providerId of this.providerIds()) this.recomposeProvider(providerId);
+		for (const accountId of this.accountInstances.keys()) {
+			if (!this.config.getAccount(accountId)) this.accountInstances.delete(accountId);
+		}
+		for (const providerId of this.providerIds()) this.publishProvider(providerId);
 		this.updateModelSnapshot();
 	}
 
@@ -448,12 +501,22 @@ export class ModelRuntime implements Models {
 		return this.models.getProvider(providerId);
 	}
 
+	/**
+	 * The provider its accounts wrap, which no list shows and no request reaches. For extensions that
+	 * replace a built-in provider by wrapping it: its accounts then wrap the replacement.
+	 */
+	getAccountBase(providerId: string): Provider | undefined {
+		if (this.config.getAccountsOf(providerId).length === 0) return undefined;
+		return this.composeLayers(providerId, this.registeredBase(providerId));
+	}
+
 	getModels(providerId?: string): readonly Model<Api>[] {
 		return this.models.getModels(providerId);
 	}
 
+	/** An earlier ID of an account names that account's model, so old sessions restore. */
 	getModel(providerId: string, modelId: string): Model<Api> | undefined {
-		return this.models.getModel(providerId, modelId);
+		return this.models.getModel(this.config.resolveAlias(providerId), modelId);
 	}
 
 	getModelsOfType<TType extends ModelType>(type: TType, providerId?: string): readonly ModelTypeMap[TType][] {
@@ -465,7 +528,7 @@ export class ModelRuntime implements Models {
 		providerId: string,
 		modelId: string,
 	): ModelTypeMap[TType] | undefined {
-		return this.models.getModelOfType(type, providerId, modelId);
+		return this.models.getModelOfType(type, this.config.resolveAlias(providerId), modelId);
 	}
 
 	getAllModels(providerId?: string): readonly AnyModel[] {
@@ -529,8 +592,13 @@ export class ModelRuntime implements Models {
 		return [...new Set([...this.extensionProviders.keys(), ...this.nativeExtensionProviders.keys()])];
 	}
 
+	/** The provider whose models.json entry and extension registration configure `providerId`: an account's is its provider's. */
+	private layersOf(providerId: string): string {
+		return this.config.getAccount(providerId)?.accountOf ?? providerId;
+	}
+
 	getProviderTransportOptions(providerId: string): Pick<StreamOptions, "fetch" | "timeoutMs"> {
-		const transport = this.config.getProvider(providerId)?.transport;
+		const transport = this.config.getProvider(this.layersOf(providerId))?.transport;
 		if (!transport) return {};
 		return {
 			...(transport.requestTimeoutMs !== undefined ? { timeoutMs: transport.requestTimeoutMs } : {}),
@@ -548,8 +616,8 @@ export class ModelRuntime implements Models {
 	getCompatibilityRequestConfig(model: Model<Api>): CompatibilityRequestConfig {
 		return resolveCompatibilityRequestConfig(
 			model,
-			this.config.getProvider(model.provider),
-			this.extensionProviders.get(model.provider),
+			this.config.getProvider(this.layersOf(model.provider)),
+			this.extensionProviders.get(this.layersOf(model.provider)),
 		);
 	}
 
@@ -576,8 +644,8 @@ export class ModelRuntime implements Models {
 		if (!resolution) return undefined;
 		const configuredHeaders = resolveConfiguredModelHeaders(
 			providerOrModel,
-			this.config.getProvider(providerOrModel.provider),
-			this.extensionProviders.get(providerOrModel.provider),
+			this.config.getProvider(this.layersOf(providerOrModel.provider)),
+			this.extensionProviders.get(this.layersOf(providerOrModel.provider)),
 			{ ...(resolution.env ?? {}), ...(overrides.env ?? {}) },
 		);
 		return {
@@ -951,7 +1019,17 @@ export class ModelRuntime implements Models {
 			configuredRequestAuthStatus(this.config.getProvider(provider.id), undefined),
 			provider.auth.oauth && !provider.auth.apiKey ? "oauth" : "api_key",
 		);
+		this.markAccountsProvisionallyConfigured(provider.id);
 		void this.refresh({ allowNetwork: false });
+	}
+
+	/** As markProvisionallyConfigured, for the accounts of a provider that has just registered. */
+	private markAccountsProvisionallyConfigured(providerId: string): void {
+		for (const account of this.config.getAccountsOf(providerId)) {
+			const auth = this.models.getProvider(account.id)?.auth;
+			if (!auth) continue;
+			this.markProvisionallyConfigured(account.id, undefined, auth.oauth && !auth.apiKey ? "oauth" : "api_key");
+		}
 	}
 
 	/**
@@ -997,6 +1075,7 @@ export class ModelRuntime implements Models {
 			configuredRequestAuthStatus(this.config.getProvider(providerId), effective),
 			effective.oauth && !effective.apiKey ? "oauth" : "api_key",
 		);
+		this.markAccountsProvisionallyConfigured(providerId);
 		void this.refresh({ allowNetwork: false });
 	}
 
@@ -1087,7 +1166,7 @@ export class ModelRuntime implements Models {
 
 	/** A catalog chat model that is not virtual. */
 	getPhysicalModel(providerId: string, modelId: string): Model<Api> | undefined {
-		const model = this.models.getModel(providerId, modelId);
+		const model = this.getModel(providerId, modelId);
 		return model && !isVirtualModel(model) ? model : undefined;
 	}
 }

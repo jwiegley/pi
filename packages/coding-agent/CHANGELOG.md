@@ -7,6 +7,7 @@
 - Added SQLite-backed bounded session history with paged navigation, streamed export, atomic migration, and lazy active transcripts.
 - Added extension task turns with distinct steer, follow-up, and abort controls.
 - Added provider-scoped request and idle timeouts, model-local default thinking levels, and extension tool-renderer wrappers.
+- Added provider accounts: a `models.json` provider with `accountOf` is another account of a built-in or extension provider, with its own credential, and `aliases` keeps its earlier provider IDs resolving. A provider with accounts is reachable only through them.
 - Added `models.json` schema descriptions and Models Configuration reference rows for provider `transport` timeouts and model `defaultThinkingLevel`.
 
 ### Changed
