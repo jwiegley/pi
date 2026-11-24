@@ -402,6 +402,28 @@
                   }
                 }
               }
+            },
+            "accountOf": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Makes this provider another account of the named provider: the same models, login and requests, with its own credential. The named provider is then reachable only through its accounts."
+            },
+            "aliases": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "Earlier provider IDs of this account. Sessions and model references that name one resolve to this account; no list shows them. Requires accountOf."
+            },
+            "env": {
+              "type": "object",
+              "patternProperties": {
+                "^.*$": {
+                  "type": "string"
+                }
+              },
+              "description": "The only environment variables the provider's authentication sees for this account, as literal values. Requires accountOf."
             }
           }
         }
