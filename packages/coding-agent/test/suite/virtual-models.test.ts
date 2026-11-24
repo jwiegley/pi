@@ -3,7 +3,13 @@ import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@eare
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "../../src/core/extensions/index.ts";
-import { type ModelRoute, type ModelRouteRequest, VIRTUAL_MODEL_STATE_ENTRY } from "../../src/core/virtual-models.ts";
+import {
+	type ModelRecovery,
+	type ModelRecoveryRequest,
+	type ModelRoute,
+	type ModelRouteRequest,
+	VIRTUAL_MODEL_STATE_ENTRY,
+} from "../../src/core/virtual-models.ts";
 import { createHarness, type Harness, type HarnessOptions } from "./harness.ts";
 
 const echoTool: AgentTool = {
@@ -36,13 +42,22 @@ describe("AgentSession virtual models", () => {
 		for (const harness of harnesses.splice(0)) harness.cleanup();
 	});
 
-	async function createRoutedHarness(route: Route = defaultRoute, options: HarnessOptions = {}) {
+	async function createRoutedHarness(
+		route: Route = defaultRoute,
+		options: HarnessOptions = {},
+		recover?: (
+			request: ModelRecoveryRequest,
+			ctx: ExtensionContext,
+		) => ModelRecovery | undefined | Promise<ModelRecovery | undefined>,
+	) {
 		const requests: ModelRouteRequest[] = [];
 		const harness = await createHarness({
 			...options,
 			models: [
 				{ id: "small", contextWindow: 1000 },
 				{ id: "large", contextWindow: 50_000, maxTokens: 4000, reasoning: true },
+				{ id: "medium", contextWindow: 50_000 },
+				{ id: "other", contextWindow: 50_000 },
 			],
 			tools: [echoTool],
 			extensionFactories: [
@@ -58,6 +73,7 @@ describe("AgentSession virtual models", () => {
 							requests.push(request);
 							return route(request, ctx);
 						},
+						...(recover ? { recover } : {}),
 					});
 				},
 			],
@@ -76,6 +92,329 @@ describe("AgentSession virtual models", () => {
 			);
 		return { harness, requests, reasons, dispatched };
 	}
+
+	it("recovers a failed virtual request with a distinct physical model", async () => {
+		const seen: ModelRecoveryRequest[] = [];
+		const { harness, dispatched } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			(request, ctx) => {
+				seen.push(request);
+				return {
+					kind: "error",
+					status: 400,
+					route: { model: ctx.modelRegistry.find("faux", "small")!, thinkingLevel: "off" },
+				};
+			},
+		);
+		const contexts: string[] = [];
+		const stream = harness.session.agent.streamFunction;
+		harness.session.agent.streamFunction = (model, context, options) => {
+			contexts.push(JSON.stringify(context.messages));
+			return stream(model, context, options);
+		};
+		harness.setResponses([
+			fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "400 bad request" }),
+			fauxAssistantMessage("recovered"),
+		]);
+		await harness.session.prompt("hello");
+		expect(seen).toHaveLength(2);
+		expect(seen[0]).toMatchObject({ reason: "user", physical: { id: "large" }, attempts: [] });
+		expect(dispatched()).toEqual(["faux/small:off"]);
+		expect(contexts).toHaveLength(2);
+		expect(contexts[1]).toContain("hello");
+		expect(contexts[1]).not.toContain("partial");
+		expect(harness.eventsOfType("message_end").filter((event) => event.message.role === "assistant")).toHaveLength(2);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "context_edit")).toHaveLength(1);
+	});
+
+	it("keeps the original response when no alternate is offered", async () => {
+		const { harness, dispatched } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			() => undefined,
+		);
+		harness.setResponses([fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "400 bad request" })]);
+		await harness.session.prompt("hello");
+		expect(dispatched()).toEqual(["faux/large:high"]);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "context_edit")).toHaveLength(0);
+	});
+
+	it("restores the original when confirmation withdraws the alternate", async () => {
+		let calls = 0;
+		const { harness } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			(_request, ctx) =>
+				++calls === 1
+					? { kind: "error", route: { model: ctx.modelRegistry.find("faux", "small")!, thinkingLevel: "off" } }
+					: undefined,
+		);
+		harness.setResponses([fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "400 bad request" })]);
+		await harness.session.prompt("hello");
+		expect(calls).toBe(2);
+		expect(
+			harness.session.messages.some((message) => message.role === "assistant" && message.model === "large"),
+		).toBe(true);
+		expect(
+			harness.session.messages.some((message) => message.role === "assistant" && message.model === "small"),
+		).toBe(false);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "context_edit")).toHaveLength(2);
+	});
+
+	it("stops after distinct models report the same 4xx", async () => {
+		const seen: ModelRecoveryRequest[] = [];
+		const { harness, dispatched } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			(request, ctx) => {
+				seen.push(request);
+				const next = request.physical.id === "large" ? "medium" : "other";
+				return {
+					kind: "error",
+					status: 400,
+					route: { model: ctx.modelRegistry.find("faux", next)!, thinkingLevel: "off" },
+				};
+			},
+		);
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "400 bad request" }),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "400 bad request" }),
+			fauxAssistantMessage("should not run"),
+		]);
+		await harness.session.prompt("hello");
+		expect(dispatched()).toEqual(["faux/medium:off"]);
+		expect(seen).toHaveLength(3);
+		expect(seen[2].attempts).toMatchObject([{ model: { provider: "faux", id: "large" }, status: 400 }]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("offers at most one alternate after a degenerate outcome", async () => {
+		const { harness, dispatched } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			(request, ctx) => ({
+				kind: "degenerate",
+				route: {
+					model: ctx.modelRegistry.find("faux", request.physical.id === "large" ? "medium" : "other")!,
+					thinkingLevel: "off",
+				},
+			}),
+		);
+		harness.setResponses([
+			fauxAssistantMessage("repeat", { stopReason: "length" }),
+			fauxAssistantMessage("repeat again", { stopReason: "length" }),
+			fauxAssistantMessage("should not run"),
+		]);
+		await harness.session.prompt("hello");
+		expect(dispatched()).toEqual(["faux/medium:off"]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("offers a degenerate alternate before length compaction", async () => {
+		const { harness, dispatched } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: {
+					retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 },
+					compaction: { enabled: true, reserveTokens: 1_000 },
+				},
+			},
+			(_request, ctx) => ({
+				kind: "degenerate",
+				route: { model: ctx.modelRegistry.find("faux", "medium")!, thinkingLevel: "off" },
+			}),
+		);
+		harness.setResponses([
+			fauxAssistantMessage("repeat", { stopReason: "length" }),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("should not run"),
+		]);
+		await harness.session.prompt("hello");
+		expect(dispatched()).toEqual(["faux/medium:off"]);
+		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("does not offer recovery for context overflow", async () => {
+		const recover = vi.fn();
+		const { harness } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			recover,
+		);
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" }),
+		]);
+		await harness.session.prompt("hello");
+		expect(recover).not.toHaveBeenCalled();
+	});
+
+	it("bounds error recovery to three alternates", async () => {
+		const { harness } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			(request, ctx) => {
+				const next = (
+					{ large: "medium", medium: "other", other: "small", small: "large" } as Record<string, string>
+				)[request.physical.id];
+				return {
+					kind: "error",
+					status: 500,
+					route: { model: ctx.modelRegistry.find("faux", next)!, thinkingLevel: "off" },
+				};
+			},
+		);
+		harness.setResponses([
+			...Array.from({ length: 4 }, () =>
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "500 failure" }),
+			),
+			fauxAssistantMessage("should not run"),
+		]);
+		await harness.session.prompt("hello");
+		expect(harness.eventsOfType("message_end").filter((event) => event.message.role === "assistant")).toHaveLength(4);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("never recovers a response containing a tool call", async () => {
+		const recover = vi.fn();
+		const { harness } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			recover,
+		);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("echo", { text: "hello" }), {
+				stopReason: "error",
+				errorMessage: "400 invalid",
+			}),
+		]);
+		await harness.session.prompt("hello");
+		expect(recover).not.toHaveBeenCalled();
+	});
+
+	it("restores the failed attempt when selection changes during confirmation", async () => {
+		let calls = 0;
+		let harness: Harness;
+		({ harness } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			async (_request, ctx) => {
+				if (++calls === 2) await harness.session.setModel(harness.getModel("other")!);
+				return { kind: "error", route: { model: ctx.modelRegistry.find("faux", "small")!, thinkingLevel: "off" } };
+			},
+		));
+		harness.setResponses([
+			fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "400 invalid" }),
+			fauxAssistantMessage("should not run"),
+		]);
+		await harness.session.prompt("hello");
+		expect(calls).toBe(2);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(
+			harness.session.messages.some((message) => message.role === "assistant" && message.model === "large"),
+		).toBe(true);
+	});
+
+	it("restores the failed attempt when the branch changes before confirmation", async () => {
+		let calls = 0;
+		let harness: Harness;
+		({ harness } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			(_request, ctx) => {
+				if (++calls === 2) harness.sessionManager.appendCustomEntry("test.branch-moved", {});
+				return { kind: "error", route: { model: ctx.modelRegistry.find("faux", "small")!, thinkingLevel: "off" } };
+			},
+		));
+		harness.setResponses([
+			fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "400 invalid" }),
+			fauxAssistantMessage("should not run"),
+		]);
+		await harness.session.prompt("hello");
+		expect(calls).toBe(2);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(
+			harness.session.messages.some((message) => message.role === "assistant" && message.model === "large"),
+		).toBe(true);
+	});
+
+	it("declines an alternate the conversation does not fit, leaving the original response as it was", async () => {
+		const { harness, dispatched } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: {
+					retry: { enabled: false },
+					compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 1 },
+				},
+			},
+			(_request, ctx) => ({
+				kind: "error",
+				route: { model: ctx.modelRegistry.find("faux", "small")!, thinkingLevel: "off" },
+			}),
+		);
+		harness.setResponses([
+			fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "400 invalid" }),
+			fauxAssistantMessage("should not run"),
+		]);
+		await harness.session.prompt("x".repeat(8000));
+		expect(dispatched()).toEqual(["faux/large:high"]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "context_edit")).toHaveLength(0);
+	});
+
+	it("does not recover after cancellation during the offer", async () => {
+		let offered!: () => void;
+		let release!: () => void;
+		const started = new Promise<void>((resolve) => {
+			offered = resolve;
+		});
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { harness } = await createRoutedHarness(
+			defaultRoute,
+			{
+				settings: { retry: { enabled: false }, compaction: { enabled: false } },
+			},
+			async (_request, ctx) => {
+				offered();
+				await gate;
+				return { kind: "error", route: { model: ctx.modelRegistry.find("faux", "small")!, thinkingLevel: "off" } };
+			},
+		);
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "400 invalid" }),
+			fauxAssistantMessage("should not run"),
+		]);
+		const run = harness.session.prompt("hello");
+		await started;
+		const abort = harness.session.abort();
+		release();
+		await Promise.all([run, abort]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "context_edit")).toHaveLength(0);
+	});
 
 	it("routes each request, including retries, while the selection stays virtual", async () => {
 		const { harness, requests, reasons, dispatched } = await createRoutedHarness(defaultRoute, {

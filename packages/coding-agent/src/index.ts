@@ -426,6 +426,9 @@ export {
 	type ProjectTrustUpdate,
 } from "./core/trust-manager.ts";
 export {
+	type ModelRecovery,
+	type ModelRecoveryAttempt,
+	type ModelRecoveryRequest,
 	type ModelRoute,
 	type ModelRouteReason,
 	type ModelRouteRequest,

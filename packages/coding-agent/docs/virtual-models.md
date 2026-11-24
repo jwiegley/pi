@@ -85,6 +85,14 @@ Returning `previous` for `continuation` and `failed` for `retry` keeps prompt ca
 
 If `route()` throws, or returns a virtual model or a model without credentials, the request ends with an error response.
 
+## Recover a failed request
+
+A virtual model may define `recover(request, ctx)`. Pi calls it for an agent-loop error after its ordinary retry and compaction policies decline recovery, or for a length stop before attempting length-stop compaction. It receives the selected virtual model, physical model, original request reason and thinking level, the completed assistant message, the original request signal, and previous recovery attempts without response text. It returns `undefined` to keep the response, or `{ kind, status?, route: { model, thinkingLevel } }` to offer a distinct physical alternate. `kind` is `"error"` for an error or `"degenerate"` for a length stop; `status`, if supplied, is the provider's HTTP status. The router is responsible for deciding which errors are eligible and for enforcing its privacy and scope policies, including content-filter refusals.
+
+Pi checks credentials and model identity, permits at most three distinct alternates, and permits only one alternate after a degenerate outcome. Matching non-429 4xx statuses from distinct models stop recovery. Aborts, context overflow, tool calls in the failed response, queued messages, or a changed model selection prevent an alternate. A direct request never invokes `recover`. Pi rechecks an offer before dispatch; the callback must tolerate being called twice and may not assume an offer will be used. Pi ignores `route.state` in a recovery decision.
+
+On acceptance, Pi retains the failed response in raw session history but omits it from model context, then continues on the alternate. If confirmation fails before dispatch, Pi restores the original to model context; a cancelled continuation can also produce an error event. Both attempts remain visible to event listeners and any text already streamed remains visible: recovery cannot retract it.
+
 ## Keep routing state
 
 `route()` can return `state` next to the model. Pi stores it on the session branch and passes it back as `request.state` on later requests. Use it for decisions the transcript does not record, such as classifier results or a routing phase:

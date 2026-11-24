@@ -9,6 +9,7 @@
 - Added provider-scoped request and idle timeouts, model-local default thinking levels, and extension tool-renderer wrappers.
 - Added provider accounts: a `models.json` provider with `accountOf` is another account of a built-in or extension provider, with its own credential, and `aliases` keeps its earlier provider IDs resolving. A provider with accounts is reachable only through them.
 - Added `models.json` schema descriptions and Models Configuration reference rows for provider `transport` timeouts and model `defaultThinkingLevel`.
+- Added a `recover` callback for virtual models: after a failed response or a length stop, a router can offer another physical model, and Pi continues the run on it with the failed attempt left out of the model's context. See [Virtual Models](docs/virtual-models.md#recover-a-failed-request).
 
 ### Changed
 

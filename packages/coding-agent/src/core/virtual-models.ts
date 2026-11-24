@@ -81,6 +81,31 @@ export interface ModelRoute<TState = unknown> {
 	state?: TState;
 }
 
+/** A previous recovery failure, without response text. */
+export interface ModelRecoveryAttempt {
+	model: { provider: string; id: string };
+	kind: "error" | "degenerate";
+	status?: number;
+}
+
+/** A physical response from this virtual model's agent-loop request. */
+export interface ModelRecoveryRequest {
+	model: Model<Api>;
+	physical: Model<Api>;
+	reason: Exclude<ModelRouteReason, "direct">;
+	thinkingLevel: ModelThinkingLevel;
+	message: AssistantMessage;
+	attempts: readonly ModelRecoveryAttempt[];
+	/** Signal of the original routed request, even after the low-level run has ended. */
+	signal?: AbortSignal;
+}
+
+/** An alternate, or undefined to leave the original response in place. */
+export interface ModelRecovery {
+	route: ModelRoute;
+	kind: "error" | "degenerate";
+	status?: number;
+}
 export interface VirtualModelDefinition<TState = unknown> {
 	/** Provider the virtual model is listed under. May be a provider with physical models. */
 	provider: string;
@@ -99,6 +124,8 @@ export interface VirtualModelDefinition<TState = unknown> {
 	input?: ("text" | "image")[];
 	/** Pick the physical model, which must have credentials, and thinking level for one request. */
 	route(request: ModelRouteRequest<TState>): ModelRoute<TState> | Promise<ModelRoute<TState>>;
+	/** Offer an alternate for a failed response or length stop. Called twice; it must be safe to recheck. */
+	recover?(request: ModelRecoveryRequest): ModelRecovery | undefined | Promise<ModelRecovery | undefined>;
 }
 
 /** Whether a model or message names a virtual model. Failed routing leaves the virtual model on its message. */

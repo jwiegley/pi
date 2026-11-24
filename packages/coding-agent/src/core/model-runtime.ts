@@ -90,6 +90,8 @@ import {
 	createVirtualModel,
 	findLatestResponse,
 	isVirtualModel,
+	type ModelRecovery,
+	type ModelRecoveryRequest,
 	type ModelRoute,
 	type ModelRouteReason,
 	type VirtualModelDefinition,
@@ -99,6 +101,7 @@ import {
 interface RegisteredVirtualModel {
 	model: Model<Api>;
 	route: VirtualModelDefinition["route"];
+	recover?: VirtualModelDefinition["recover"];
 }
 
 interface ModelRuntimeSnapshot {
@@ -1100,7 +1103,11 @@ export class ModelRuntime implements Models {
 			throw new Error(`Virtual model ${providerId}/${id} conflicts with a physical model.`);
 		}
 		const models = this.virtualModels.get(providerId) ?? new Map<string, RegisteredVirtualModel>();
-		models.set(id, { model: createVirtualModel(definition), route: (request) => definition.route(request) });
+		models.set(id, {
+			model: createVirtualModel(definition),
+			route: (request) => definition.route(request),
+			recover: definition.recover,
+		});
 		this.virtualModels.set(providerId, models);
 		if (!this.recomposeProvider(providerId) && !this.snapshot.configuredProviders.has(providerId)) {
 			// A provider of only virtual models needs no credentials. Mark it configured now: session
@@ -1162,6 +1169,28 @@ export class ModelRuntime implements Models {
 		if (!target) throw new Error(`${routed}, which is not a physical model.`);
 		if (!this.hasConfiguredAuth(target.provider)) throw new Error(`${routed}, which has no credentials.`);
 		return { model: target, thinkingLevel: clampThinkingLevel(target, route.thinkingLevel), state: route.state };
+	}
+
+	/** Ask the selected virtual model for a validated physical alternate. */
+	async recoverModel(request: ModelRecoveryRequest): Promise<ModelRecovery | undefined> {
+		const recover = this.virtualModels.get(request.model.provider)?.get(request.model.id)?.recover;
+		if (!recover) return undefined;
+		const decision = await recover(request);
+		if (!decision) return undefined;
+		if (decision.kind !== "error" && decision.kind !== "degenerate") throw new Error("Invalid recovery kind.");
+		if (
+			decision.status !== undefined &&
+			(!Number.isInteger(decision.status) || decision.status < 100 || decision.status > 599)
+		) {
+			throw new Error("Invalid recovery status.");
+		}
+		const target = this.getPhysicalModel(decision.route.model.provider, decision.route.model.id);
+		if (!target || !this.hasConfiguredAuth(target.provider))
+			throw new Error("Recovery target is not an authenticated physical model.");
+		return {
+			...decision,
+			route: { model: target, thinkingLevel: clampThinkingLevel(target, decision.route.thinkingLevel) },
+		};
 	}
 
 	/** A catalog chat model that is not virtual. */

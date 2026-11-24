@@ -160,6 +160,9 @@ import {
 	getVirtualModelState,
 	isSuccessfulResponse,
 	isVirtualModel,
+	type ModelRecovery,
+	type ModelRecoveryAttempt,
+	type ModelRecoveryRequest,
 	VIRTUAL_MODEL_STATE_ENTRY,
 	type VirtualModelStateData,
 } from "./virtual-models.ts";
@@ -476,6 +479,11 @@ export class AgentSession {
 	 * retry is routed with it as `failed`, since the context no longer contains it.
 	 */
 	private _failedResponse: AssistantMessage | undefined;
+	private _lastVirtualRequest: Omit<ModelRecoveryRequest, "message" | "attempts"> | undefined;
+	private _recoveryAttempts: ModelRecoveryAttempt[] = [];
+	private _pendingRecovery:
+		| { request: ModelRecoveryRequest; decision: ModelRecovery; leafId: string | null }
+		| undefined;
 
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
@@ -907,8 +915,51 @@ export class AgentSession {
 			let { previous, context, projection } = await prepare();
 			const model = previous?.model ?? this.agent.state.model;
 			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
+			const pending = this._pendingRecovery;
+			this._pendingRecovery = undefined;
+			this._lastVirtualRequest = undefined;
+			if (pending) {
+				const selected = pending.request.model;
+				const sameSelection = (candidate: Model<any>) =>
+					isVirtualModel(candidate) && candidate.provider === selected.provider && candidate.id === selected.id;
+				try {
+					if (!sameSelection(model)) throw new Error("Recovery cancelled: model selection changed.");
+					const confirm = await this._modelRuntime.recoverModel(pending.request);
+					const route = pending.decision.route;
+					if (
+						this._agentRunAbortRequested ||
+						signal?.aborted ||
+						this.sessionManager.getLeafId() !== pending.leafId ||
+						!sameSelection(this.agent.state.model) ||
+						!sameSelection(previous?.model ?? this.agent.state.model) ||
+						!confirm ||
+						confirm.kind !== pending.decision.kind ||
+						confirm.status !== pending.decision.status ||
+						confirm.route.model.provider !== route.model.provider ||
+						confirm.route.model.id !== route.model.id ||
+						confirm.route.thinkingLevel !== route.thinkingLevel ||
+						this._exceedsCompactionThreshold(route.model, projection)
+					)
+						throw new Error("Recovery cancelled: alternate is no longer eligible.");
+					this._recoveryAttempts.push({
+						model: { provider: pending.request.physical.provider, id: pending.request.physical.id },
+						kind: confirm.kind,
+						status: confirm.status,
+					});
+					this._lastVirtualRequest = {
+						model: selected,
+						physical: route.model,
+						reason: "retry",
+						thinkingLevel: pending.request.thinkingLevel,
+						signal: pending.request.signal,
+					};
+					return { ...previous, context, model: route.model, thinkingLevel: route.thinkingLevel };
+				} catch (error) {
+					this._restoreRecoveryAttempt(pending.request.message);
+					throw error;
+				}
+			}
 			if (!isVirtualModel(model)) return { ...previous, context, model, thinkingLevel };
-
 			// The selection stays in agent state; only this request uses the routed model. A routing
 			// failure rejects, which ends the run with an error response. Only messages the user wrote
 			// start a turn; extension messages can follow them, e.g. from before_agent_start.
@@ -935,6 +986,13 @@ export class AgentSession {
 				await this._runAutoCompaction("threshold", false);
 				({ previous, context } = await prepare());
 			}
+			this._lastVirtualRequest = {
+				model,
+				physical: route.model,
+				reason: failed ? "retry" : userTurn ? "user" : "continuation",
+				thinkingLevel,
+				signal,
+			};
 			return { ...previous, context, model: route.model, thinkingLevel: route.thinkingLevel };
 		};
 	}
@@ -1272,6 +1330,8 @@ export class AgentSession {
 			if (event.message.role === "assistant") {
 				const assistantMsg = event.message as AssistantMessage;
 				this._lastAssistantMessage = assistantMsg;
+				if (assistantMsg.stopReason === "stop" || assistantMsg.stopReason === "toolUse")
+					this._recoveryAttempts = [];
 				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
 					this._overflowRecoveryAttempted = false;
 				}
@@ -1376,6 +1436,20 @@ export class AgentSession {
 			const entry = this.sessionManager.getEntry(editId);
 			if (entry) this._emit({ type: "entry_appended", entry });
 		}
+		this._refreshFinalizedContext();
+	}
+
+	private _restorePendingRecovery(): void {
+		if (this._pendingRecovery) this._restoreRecoveryAttempt(this._pendingRecovery.request.message);
+	}
+
+	/** Restore an unpaired recovery attempt when confirmation fails before a provider call. */
+	private _restoreRecoveryAttempt(message: AssistantMessage): void {
+		const targetId = this._findPersistedMessageEntryId(message);
+		if (!targetId) throw new Error("Cannot restore recovery attempt without its source entry");
+		const editId = this.sessionManager.appendContextEdit(targetId, { content: message.content });
+		const entry = this.sessionManager.getEntry(editId);
+		if (entry) this._emit({ type: "entry_appended", entry });
 		this._refreshFinalizedContext();
 	}
 
@@ -2074,6 +2148,9 @@ export class AgentSession {
 
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
 		this._failedResponse = undefined;
+		this._lastVirtualRequest = undefined;
+		this._pendingRecovery = undefined;
+		this._recoveryAttempts = [];
 		this._recordSelection();
 		// The run records the loadout in the transcript; restored tools that did not register by now
 		// are dropped, so a tool that never registers does not stay pending.
@@ -2093,6 +2170,10 @@ export class AgentSession {
 		} finally {
 			if (this._agentRunAbortRequested) this._finishCancelledRetry();
 			this._failedResponse = undefined;
+			this._lastVirtualRequest = undefined;
+			this._restorePendingRecovery();
+			this._pendingRecovery = undefined;
+			this._recoveryAttempts = [];
 			this._runSystemPromptOptions = undefined;
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
@@ -2170,7 +2251,11 @@ export class AgentSession {
 		}
 		if (!message) return this.agent.hasQueuedMessages();
 
-		if (this._isRetryableError(message) && (await this._prepareRetry(message))) {
+		if (
+			!this._recoveryAttempts.some((attempt) => attempt.kind === "degenerate") &&
+			this._isRetryableError(message) &&
+			(await this._prepareRetry(message))
+		) {
 			if (this._agentRunAbortRequested) this._finishCancelledRetry();
 			this._failedResponse = message;
 			return !this._agentRunAbortRequested;
@@ -2190,13 +2275,77 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
+		if (message.stopReason === "length" && (await this._prepareVirtualRecovery(message)))
+			return !this._agentRunAbortRequested;
 		if (await this._checkCompaction(message)) {
 			return !this._agentRunAbortRequested;
 		}
 
+		if (message.stopReason !== "length" && (await this._prepareVirtualRecovery(message)))
+			return !this._agentRunAbortRequested;
 		// The low-level loop drains both queues before agent_end. Messages queued by
 		// agent_end handlers require a fresh run before pre-settlement handlers fire.
 		return !this._agentRunAbortRequested && this.agent.hasQueuedMessages();
+	}
+
+	private async _prepareVirtualRecovery(message: AssistantMessage): Promise<boolean> {
+		const last = this._lastVirtualRequest;
+		const selected = this.agent.state.model;
+		if (
+			!last ||
+			this._agentRunAbortRequested ||
+			last.signal?.aborted ||
+			this.agent.hasQueuedMessages() ||
+			selected.provider !== last.model.provider ||
+			selected.id !== last.model.id ||
+			!isVirtualModel(selected) ||
+			message.provider !== last.physical.provider ||
+			message.model !== last.physical.id ||
+			(message.stopReason !== "error" && message.stopReason !== "length") ||
+			message.content.some((block) => block.type === "toolCall") ||
+			isContextOverflow(message, last.physical.contextWindow) ||
+			(message.stopReason === "length" &&
+				message.usage.output <= 4 &&
+				last.physical.contextWindow > 0 &&
+				message.usage.input + message.usage.cacheRead >= last.physical.contextWindow * 0.99) ||
+			this._recoveryAttempts.length >= 3 ||
+			this._recoveryAttempts.some((attempt) => attempt.kind === "degenerate")
+		)
+			return false;
+		const request: ModelRecoveryRequest = { ...last, message, attempts: this._recoveryAttempts.slice() };
+		try {
+			const decision = await this._modelRuntime.recoverModel(request);
+			if (!decision || this._agentRunAbortRequested || last.signal?.aborted || this.agent.hasQueuedMessages())
+				return false;
+			const { model } = decision.route;
+			if (
+				(decision.kind === "error" && message.stopReason !== "error") ||
+				(decision.kind === "degenerate" && message.stopReason !== "length") ||
+				(model.provider === last.physical.provider && model.id === last.physical.id) ||
+				this._recoveryAttempts.some(
+					(attempt) => attempt.model.provider === model.provider && attempt.model.id === model.id,
+				) ||
+				(decision.status !== undefined &&
+					decision.status >= 400 &&
+					decision.status < 500 &&
+					decision.status !== 429 &&
+					this._recoveryAttempts.some(
+						(attempt) =>
+							attempt.status === decision.status &&
+							(attempt.model.provider !== last.physical.provider || attempt.model.id !== last.physical.id),
+					))
+			)
+				return false;
+			// An alternate the conversation does not fit is declined here, while the original response
+			// still stands, rather than cancelled after the attempt was omitted.
+			if (this._exceedsCompactionThreshold(model, this.sessionManager.buildSessionProjection())) return false;
+			this._omitRecoveryAttempt(message);
+			this._pendingRecovery = { request, decision, leafId: this.sessionManager.getLeafId() };
+			return true;
+		} catch {
+			// A recovery callback cannot replace or erase the original response by failing.
+			return false;
+		}
 	}
 
 	private async _runBeforeSettleBoundary(): Promise<boolean> {

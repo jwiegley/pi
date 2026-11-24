@@ -528,9 +528,11 @@ function createExtensionAPI(
 			assertActive();
 			// Routing runs after the runner binds, so the context is created per request. The state
 			// comes from the session branch that this router wrote.
+			const { recover, ...modelDefinition } = model;
 			const definition: VirtualModelDefinition = {
-				...model,
+				...modelDefinition,
 				route: (request) => model.route(request as ModelRouteRequest<TState>, runtime.createContext()),
+				...(recover ? { recover: (request) => recover(request, runtime.createContext()) } : {}),
 			};
 			applyRuntimeChange(() => runtime.registerVirtualModel(definition, extension.path));
 		},
