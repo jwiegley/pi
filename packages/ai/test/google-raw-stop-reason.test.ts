@@ -7,7 +7,7 @@ const googleGenAiMock = vi.hoisted(() => ({
 	streamChunks: undefined as Array<Record<string, unknown>> | undefined,
 }));
 
-vi.mock("@google/genai", () => {
+vi.mock("@google/genai", async (importOriginal) => {
 	class GoogleGenAI {
 		constructor(config: Record<string, unknown>) {
 			googleGenAiMock.constructorCalls.push(config);
@@ -49,44 +49,7 @@ vi.mock("@google/genai", () => {
 		};
 	}
 
-	return {
-		FinishReason: {
-			STOP: "STOP",
-			MAX_TOKENS: "MAX_TOKENS",
-			BLOCKLIST: "BLOCKLIST",
-			PROHIBITED_CONTENT: "PROHIBITED_CONTENT",
-			SPII: "SPII",
-			SAFETY: "SAFETY",
-			IMAGE_SAFETY: "IMAGE_SAFETY",
-			IMAGE_PROHIBITED_CONTENT: "IMAGE_PROHIBITED_CONTENT",
-			IMAGE_RECITATION: "IMAGE_RECITATION",
-			IMAGE_OTHER: "IMAGE_OTHER",
-			RECITATION: "RECITATION",
-			FINISH_REASON_UNSPECIFIED: "FINISH_REASON_UNSPECIFIED",
-			OTHER: "OTHER",
-			LANGUAGE: "LANGUAGE",
-			MALFORMED_FUNCTION_CALL: "MALFORMED_FUNCTION_CALL",
-			UNEXPECTED_TOOL_CALL: "UNEXPECTED_TOOL_CALL",
-			NO_IMAGE: "NO_IMAGE",
-		},
-		FunctionCallingConfigMode: {
-			AUTO: "AUTO",
-			NONE: "NONE",
-			ANY: "ANY",
-			VALIDATED: "VALIDATED",
-		},
-		GoogleGenAI,
-		ResourceScope: {
-			COLLECTION: "COLLECTION",
-		},
-		ThinkingLevel: {
-			THINKING_LEVEL_UNSPECIFIED: "THINKING_LEVEL_UNSPECIFIED",
-			MINIMAL: "MINIMAL",
-			LOW: "LOW",
-			MEDIUM: "MEDIUM",
-			HIGH: "HIGH",
-		},
-	};
+	return { ...(await importOriginal<Record<string, unknown>>()), GoogleGenAI };
 });
 
 import { stream as streamGoogleGenerativeAi } from "../src/api/google-generative-ai.ts";
@@ -135,8 +98,15 @@ describe("Google raw stop reasons", () => {
 		expect(message.errorMessage).toBe("Provider stopped with: MALFORMED_FUNCTION_CALL");
 	});
 
-	it("preserves raw Gemini finish reasons for Google Vertex errors", async () => {
-		googleGenAiMock.finishReason = "SAFETY";
+	it.each([
+		"SAFETY",
+		"MODEL_ARMOR",
+		"ESCALATION",
+		"PUP_LIMITED_DISABLED",
+		"MISSING_THOUGHT_SIGNATURE",
+		"MALFORMED_RESPONSE",
+	])("preserves raw finish reason %s as an error", async (reason) => {
+		googleGenAiMock.finishReason = reason;
 		googleGenAiMock.includeFunctionCall = false;
 
 		const stream = streamGoogleVertex(getModel("google-vertex", "gemini-3-flash-preview"), context, {
@@ -147,8 +117,8 @@ describe("Google raw stop reasons", () => {
 		const message = await stream.result();
 
 		expect(message.stopReason).toBe("error");
-		expect(message.rawStopReason).toBe("SAFETY");
-		expect(message.errorMessage).toBe("Provider stopped with: SAFETY");
+		expect(message.rawStopReason).toBe(reason);
+		expect(message.errorMessage).toBe(`Provider stopped with: ${reason}`);
 	});
 
 	const adapters = [

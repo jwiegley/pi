@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { streamSimple as streamSimpleGoogle } from "../src/api/google-generative-ai.ts";
 import { resolveGoogleThinkingLevel } from "../src/api/google-shared.ts";
 import { streamSimple as streamSimpleVertex } from "../src/api/google-vertex.ts";
+import { GOOGLE_MODELS } from "../src/providers/google.models.ts";
+import { GOOGLE_VERTEX_MODELS } from "../src/providers/google-vertex.models.ts";
 import type { Model, ThinkingBudgets, ThinkingLevel, ThinkingLevelMap } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
@@ -118,6 +120,8 @@ describe("Google thinking level maps", () => {
 			LOW: "low",
 			MEDIUM: "medium",
 			HIGH: "high",
+			xhigh: "xhigh",
+			XHIGH: "xhigh",
 		} as const;
 		for (const [mapped, expected] of Object.entries(mappedExpectations)) {
 			const model = googleModel("gemini-3.7-flash", { high: mapped, xhigh: mapped, max: mapped });
@@ -171,6 +175,61 @@ describe("Google thinking level maps", () => {
 		const payload = await capture("gemini-4-argon", {}, "medium");
 
 		expect(payload.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "MEDIUM" });
+	});
+
+	it.each([
+		["gemini-4-argon", "HIGH"],
+		["gemini-4-hydrogen", "XHIGH"],
+		["gemini-4-neon", "XHIGH"],
+		["gemini-4-carbon", "HIGH"],
+	] as const)("encodes all seven Pi levels for the catalogued %s", async (id, highest) => {
+		// An omitted reasoning option represents off. These models require at least LOW.
+		for (const [reasoning, expected] of [
+			[undefined, "LOW"],
+			["minimal", "LOW"],
+			["low", "LOW"],
+			["medium", "MEDIUM"],
+			["high", "HIGH"],
+			["xhigh", highest],
+			["max", highest],
+		] as const) {
+			const google = await captureGooglePayload(GOOGLE_MODELS[id], reasoning);
+			const vertex = await captureVertexPayload(GOOGLE_VERTEX_MODELS[id], reasoning);
+			for (const payload of [google, vertex]) {
+				expect(payload.config?.thinkingConfig?.thinkingLevel).toBe(expected);
+				expect(payload.config?.thinkingConfig?.thinkingBudget).toBeUndefined();
+			}
+		}
+	});
+
+	it.each(googleAdapters)("does not invent a numeric XHIGH budget on $name", async ({ capture }) => {
+		await expect(capture("gemini-2.5-flash", { xhigh: "xhigh" }, "xhigh")).rejects.toThrow("xhigh -> xhigh");
+	});
+
+	it("preserves the configured URL or the previous v1beta default with SDK 3", async () => {
+		for (const [baseUrl, prefix] of [
+			["", "https://generativelanguage.googleapis.com/v1beta/"],
+			["https://example.invalid/v1beta", "https://example.invalid/v1beta/"],
+		] as const) {
+			let requestUrl: string | undefined;
+			let body: string | undefined;
+			const model = { ...googleModel("gemini-4-hydrogen", { xhigh: "xhigh" }), baseUrl };
+			await streamSimpleGoogle(model, context, {
+				apiKey: "test",
+				reasoning: "xhigh",
+				maxRetries: 0,
+				fetch: async (input, init) => {
+					const request = new Request(input, init);
+					requestUrl = request.url;
+					body = await request.text();
+					return new Response("{}", { status: 400 });
+				},
+			}).result();
+			expect(requestUrl?.startsWith(`${prefix}models/gemini-4-hydrogen:`)).toBe(true);
+			expect(JSON.parse(body ?? "null")).toMatchObject({
+				generationConfig: { thinkingConfig: { thinkingLevel: "XHIGH" } },
+			});
+		}
 	});
 
 	it.each(["xhigh", "max"] as const)("maps Google Generative AI %s to a supported level", async (reasoning) => {

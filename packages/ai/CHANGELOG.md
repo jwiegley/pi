@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed every later OpenAI Responses request failing once history held a tool call whose name Responses rejects (outside `^[a-zA-Z0-9_-]{1,128}$`), such as a shell command a model returned where the tool name belongs; replay now sends a stable `invalid_tool_name_<hash>`, and call IDs and valid names are unchanged ([#10139](https://github.com/earendil-works/pi/issues/10139))
+- Fixed Google Generative AI and Vertex rejecting catalogued `xhigh` thinking levels before sending a request. Models without native `XHIGH` still use their catalog mapping.
 
 ## [1.6.0] - 2026-11-20
 
