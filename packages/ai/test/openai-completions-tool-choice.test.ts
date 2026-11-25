@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { convertMessages } from "../src/api/openai-completions.ts";
 import { getModel, normalizeContext, stream, streamSimple } from "../src/compat.ts";
 import type { AssistantMessage, Model, SimpleStreamOptions, Tool, ToolResultMessage } from "../src/types.ts";
+import { GROQ_QWEN_36, OPENCODE_KIMI_26 } from "./catalog-test-models.ts";
 
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
@@ -317,7 +318,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("maps Groq Qwen reasoning levels to default reasoning_effort", async () => {
-		const model = getModel("groq", "qwen/qwen3.6-27b")!;
+		const model = GROQ_QWEN_36;
 		let payload: unknown;
 
 		await streamSimple(
@@ -1414,7 +1415,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("sends thinking disabled for OpenCode Kimi K2.6 when thinking is off", async () => {
-		const model = getModel("opencode", "kimi-k2.6")!;
+		const model = OPENCODE_KIMI_26;
 		let payload: unknown;
 
 		await streamSimple(
@@ -1436,7 +1437,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("sends thinking enabled for OpenCode Kimi K2.6 when thinking is enabled", async () => {
-		const model = getModel("opencode", "kimi-k2.6")!;
+		const model = OPENCODE_KIMI_26;
 		let payload: unknown;
 
 		await streamSimple(
@@ -1507,7 +1508,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("sends max_tokens for OpenCode completions models", async () => {
-		const cases = [getModel("opencode-go", "kimi-k3")!, getModel("opencode", "kimi-k2.6")!] as const;
+		const cases = [getModel("opencode-go", "kimi-k3")!, OPENCODE_KIMI_26] as const;
 
 		for (const model of cases) {
 			let payload: unknown;

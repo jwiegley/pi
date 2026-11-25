@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import { getModel, normalizeContext } from "../src/compat.ts";
 import { getSupportedThinkingLevels } from "../src/models.ts";
+import { COPILOT_OPUS_5 } from "./catalog-test-models.ts";
 
 const mockState = vi.hoisted(() => ({
 	constructorOpts: undefined as Record<string, unknown> | undefined,
@@ -57,7 +58,7 @@ describe("Copilot Claude via Anthropic Messages", () => {
 	});
 
 	it("applies Copilot-specific adaptive thinking effort overrides", () => {
-		const opus5 = getModel("github-copilot", "claude-opus-5");
+		const opus5 = COPILOT_OPUS_5;
 		expect(opus5.api).toBe("anthropic-messages");
 		expect(opus5.contextWindow).toBe(1000000);
 		expect(opus5.thinkingLevelMap).toMatchObject({ minimal: "low", xhigh: "xhigh", max: "max" });
