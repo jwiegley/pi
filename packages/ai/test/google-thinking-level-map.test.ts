@@ -106,6 +106,7 @@ describe("Google thinking level maps", () => {
 			low: "low",
 			medium: "medium",
 			high: "high",
+			xhigh: "xhigh",
 		} as const satisfies Partial<Record<ThinkingLevel, ThinkingLevel>>;
 		for (const [level, expected] of Object.entries(defaultExpectations)) {
 			expect(resolveGoogleThinkingLevel(googleModel("gemini-3.7-flash", {}), level as ThinkingLevel)).toBe(expected);
@@ -116,11 +117,11 @@ describe("Google thinking level maps", () => {
 			low: "low",
 			medium: "medium",
 			high: "high",
+			xhigh: "xhigh",
 			MINIMAL: "minimal",
 			LOW: "low",
 			MEDIUM: "medium",
 			HIGH: "high",
-			xhigh: "xhigh",
 			XHIGH: "xhigh",
 		} as const;
 		for (const [mapped, expected] of Object.entries(mappedExpectations)) {
@@ -202,8 +203,10 @@ describe("Google thinking level maps", () => {
 		}
 	});
 
-	it.each(googleAdapters)("does not invent a numeric XHIGH budget on $name", async ({ capture }) => {
-		await expect(capture("gemini-2.5-flash", { xhigh: "xhigh" }, "xhigh")).rejects.toThrow("xhigh -> xhigh");
+	it.each(googleAdapters)("uses the same numeric budget for xhigh and high on $name", async ({ capture }) => {
+		const xhigh = await capture("gemini-2.5-flash", { xhigh: "xhigh" }, "xhigh");
+		const high = await capture("gemini-2.5-flash", { high: "high" }, "high");
+		expect(xhigh.config?.thinkingConfig?.thinkingBudget).toBe(high.config?.thinkingConfig?.thinkingBudget);
 	});
 
 	it("preserves the configured URL or the previous v1beta default with SDK 3", async () => {
@@ -255,10 +258,30 @@ describe("Google thinking level maps", () => {
 		expect(payload).toMatchObject({ config: { thinkingConfig: { thinkingBudget: 1234 } } });
 	});
 
+	it("uses the high token budget for xhigh on Google Generative AI", async () => {
+		const payload = await captureGooglePayload(googleModel("gemini-2.5-flash", { xhigh: "xhigh" }), "xhigh", {
+			high: 1234,
+		});
+
+		expect(payload).toMatchObject({ config: { thinkingConfig: { thinkingBudget: 1234 } } });
+	});
+
 	it("maps Google Vertex extended levels", async () => {
 		const payload = await captureVertexPayload(vertexModel("gemini-3.7-flash", { xhigh: "high" }), "xhigh");
 
 		expect(payload).toMatchObject({ config: { thinkingConfig: { includeThoughts: true, thinkingLevel: "HIGH" } } });
+	});
+
+	it("uses the high token budget for xhigh on Google Vertex", async () => {
+		const payload = await captureVertexPayload(vertexModel("gemini-2.5-pro", { xhigh: "xhigh" }), "xhigh");
+
+		expect(payload).toMatchObject({ config: { thinkingConfig: { thinkingBudget: 32768 } } });
+	});
+
+	it("uses Gemini 2.5 Flash-Lite token budgets on Google Vertex", async () => {
+		const payload = await captureVertexPayload(vertexModel("gemini-2.5-flash-lite", {}), "minimal");
+
+		expect(payload).toMatchObject({ config: { thinkingConfig: { thinkingBudget: 512 } } });
 	});
 
 	it("uses mapped Google Vertex levels for token budgets", async () => {

@@ -6,12 +6,14 @@ import {
 	type Content,
 	FinishReason,
 	FunctionCallingConfigMode,
+	type GenerateContentResponsePromptFeedback,
 	ThinkingLevel as GoogleSdkThinkingLevel,
 	type Part,
 	type ThinkingConfig,
 } from "@google/genai";
 import { clampThinkingLevel } from "../models.ts";
 import type {
+	Api,
 	ImageContent,
 	Model,
 	StopReason,
@@ -49,7 +51,7 @@ export function resolveGoogleThinkingLevel<T extends GoogleApiType>(
 	level: ThinkingLevel,
 ): ResolvedGoogleThinkingLevel {
 	const mapped = model.thinkingLevelMap?.[level];
-	if (typeof mapped === "string" && mapped.toLowerCase() === "xhigh" && usesGoogleThinkingLevel(model)) return "xhigh";
+	if ((typeof mapped === "string" ? mapped.toLowerCase() : level) === "xhigh") return "xhigh";
 	return resolveGoogleBudgetLevel(model, level);
 }
 
@@ -61,6 +63,8 @@ export function resolveGoogleBudgetLevel<T extends GoogleApiType>(
 	const mapped = model.thinkingLevelMap?.[level];
 	const resolvedLevel = typeof mapped === "string" ? mapped.toLowerCase() : level;
 	switch (resolvedLevel) {
+		case "xhigh":
+			return "high";
 		case "minimal":
 		case "low":
 		case "medium":
@@ -85,7 +89,7 @@ export function usesGoogleThinkingLevel<T extends GoogleApiType>(model: Model<T>
 		// gemini-3-flash-preview, gemini-3.1-pro-preview, and gemini-3.8-flash.
 		/gemini-3(?:\.\d+)?-(?:pro|flash)/.test(id) ||
 		// Match Gemini 4 and later, such as gemini-4-argon (#10890).
-		/gemini-(?:[4-9]|[1-9]\d)/.test(id) ||
+		(getGeminiMajorVersion(id) ?? 0) >= 4 ||
 		id === "gemini-flash-latest" ||
 		id === "gemini-flash-lite-latest" ||
 		// Match both hosted Gemma 4 naming forms: gemma-4-* and gemma4-*.
@@ -106,6 +110,50 @@ export function toGoogleThinkingLevel(level: ResolvedGoogleThinkingLevel): Googl
 		case "xhigh":
 			return "XHIGH";
 	}
+}
+
+/** Token budget for Gemini models that use `thinkingBudget`: custom budgets first, then per-model defaults, else -1 (dynamic). */
+export function getGoogleBudget<T extends GoogleApiType>(
+	model: Model<T>,
+	resolvedLevel: ResolvedGoogleThinkingLevel,
+	customBudgets?: ThinkingBudgets,
+): number {
+	// Budgets stop at high, so xhigh uses the high budget.
+	const level = resolvedLevel === "xhigh" ? "high" : resolvedLevel;
+	const customBudget = customBudgets?.[level];
+	if (customBudget !== undefined) return customBudget;
+
+	if (model.id.includes("2.5-pro")) {
+		const budgets: Record<keyof ThinkingBudgets, number> = {
+			minimal: 128,
+			low: 2048,
+			medium: 8192,
+			high: 32768,
+		};
+		return budgets[level];
+	}
+
+	if (model.id.includes("2.5-flash-lite")) {
+		const budgets: Record<keyof ThinkingBudgets, number> = {
+			minimal: 512,
+			low: 2048,
+			medium: 8192,
+			high: 24576,
+		};
+		return budgets[level];
+	}
+
+	if (model.id.includes("2.5-flash")) {
+		const budgets: Record<keyof ThinkingBudgets, number> = {
+			minimal: 128,
+			low: 2048,
+			medium: 8192,
+			high: 24576,
+		};
+		return budgets[level];
+	}
+
+	return -1;
 }
 
 export function toGoogleSdkThinkingLevel(level: GoogleApiThinkingLevel): GoogleSdkThinkingLevel {
@@ -185,7 +233,8 @@ export function requiresToolCallId(modelId: string): boolean {
 }
 
 function getGeminiMajorVersion(modelId: string): number | undefined {
-	const match = modelId.toLowerCase().match(/^gemini(?:-live)?-(\d+)/);
+	// Unanchored like usesGoogleThinkingLevel: some hosts prefix the ID, e.g. randomprefix-gemini-4-argon (#12321).
+	const match = modelId.toLowerCase().match(/gemini(?:-live)?-(\d+)/);
 	if (!match) return undefined;
 	return Number.parseInt(match[1], 10);
 }
@@ -470,10 +519,13 @@ export function convertTools(
 	];
 }
 
-/** Gemini 3+ enforces required function parameters in validated tool-calling modes. */
-export function supportsGoogleStrictToolSampling(modelId: string): boolean {
-	const majorVersion = getGeminiMajorVersion(modelId);
-	return majorVersion !== undefined && majorVersion >= 3;
+/**
+ * Gemini 3+ enforces required function parameters in validated tool-calling modes.
+ * `compat.supportsStrictMode` overrides the model ID detection, e.g. for Gemini models served under IDs without the version.
+ */
+export function supportsGoogleStrictToolSampling<T extends GoogleApiType>(model: Model<T>): boolean {
+	const majorVersion = getGeminiMajorVersion(model.id);
+	return model.compat?.supportsStrictMode ?? (majorVersion !== undefined && majorVersion >= 3);
 }
 
 /** Map tool choice string to Gemini FunctionCallingConfigMode. */
@@ -505,6 +557,24 @@ export function resolveGoogleFunctionCallingMode(
 	return toolChoice ? mapToolChoice(toolChoice) : undefined;
 }
 
+/** Format prompt-block metadata returned instead of response candidates. */
+export function formatGooglePromptBlockError(
+	providerName: string,
+	feedback: GenerateContentResponsePromptFeedback,
+): string {
+	const details = [`${providerName} prompt blocked: ${feedback.blockReason ?? "unknown reason"}`];
+	if (feedback.blockReasonMessage) details.push(feedback.blockReasonMessage);
+	if (feedback.safetyRatings?.length) {
+		const ratings = feedback.safetyRatings.flatMap((rating) =>
+			rating.category ? [`${rating.category}${rating.probability ? ` (${rating.probability})` : ""}`] : [],
+		);
+		if (ratings.length > 0) {
+			details.push(`Safety rating${ratings.length === 1 ? "" : "s"}: ${ratings.join(", ")}`);
+		}
+	}
+	return details.join(". ");
+}
+
 /**
  * Map Gemini FinishReason to our StopReason.
  */
@@ -532,11 +602,11 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case FinishReason.UNEXPECTED_TOOL_CALL:
 		case FinishReason.TOO_MANY_TOOL_CALLS:
 		case FinishReason.NO_IMAGE:
-		case FinishReason.MALFORMED_RESPONSE:
 		case FinishReason.MISSING_THOUGHT_SIGNATURE:
+		case FinishReason.MALFORMED_RESPONSE:
 		case FinishReason.ESCALATION:
-		case FinishReason.MODEL_ARMOR:
 		case FinishReason.PUP_LIMITED_DISABLED:
+		case FinishReason.MODEL_ARMOR:
 			return "error";
 		default: {
 			const _exhaustive: never = reason;
@@ -552,11 +622,13 @@ export function mapStopReason(reason: FinishReason): StopReason {
  * retryProviderRequest. The SDK's ApiError has a `status` property but no
  * `headers` property, and retryProviderRequest only retries errors that carry
  * both, so normalize the error by adding the missing `headers` before
- * rethrowing.
+ * rethrowing. Failed attempts reach `onResponse` with their status and no
+ * headers.
  */
 export function retryGoogleRequest<T>(
 	request: () => Promise<T>,
-	options?: Pick<StreamOptions, "maxRetries" | "maxRetryDelayMs" | "signal">,
+	model: Model<Api>,
+	options?: Pick<StreamOptions, "maxRetries" | "maxRetryDelayMs" | "signal" | "onResponse">,
 ): Promise<T> {
 	return retryProviderRequest(
 		async () => {
@@ -573,6 +645,7 @@ export function retryGoogleRequest<T>(
 			maxRetries: options?.maxRetries,
 			maxRetryDelayMs: options?.maxRetryDelayMs,
 			signal: options?.signal,
+			onErrorResponse: (errorResponse) => options?.onResponse?.(errorResponse, model),
 		},
 	);
 }

@@ -203,12 +203,38 @@ function replayedFunctionName(name: string): string {
 	return RESPONSES_FUNCTION_NAME.test(name) ? name : `invalid_tool_name_${shortHash(name)}`;
 }
 
+/** Render input items for replay, as used by Codex WebSocket continuation. Use `prepareResponsesPrompt` to build a request. */
 export function convertResponsesMessages<TApi extends Api>(
 	model: Model<TApi>,
 	context: TranscriptContext,
 	allowedToolCallProviders: ReadonlySet<string>,
 	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
+	return renderResponsesTranscript(model, context, allowedToolCallProviders, options).input;
+}
+
+/** Place transcript-derived declarations and effort changes consistently in input and top-level request fields. */
+export function prepareResponsesPrompt<TApi extends Api>(
+	model: Model<TApi>,
+	context: TranscriptContext,
+	allowedToolCallProviders: ReadonlySet<string>,
+	options?: ConvertResponsesMessagesOptions & { effortBaseline?: "initial" },
+) {
+	const { input, requestTools, requestEffortBaseline } = renderResponsesTranscript(
+		model,
+		context,
+		allowedToolCallProviders,
+		options,
+	);
+	return { input, requestTools: convertResponsesTools(requestTools, options?.toolOptions), requestEffortBaseline };
+}
+
+function renderResponsesTranscript<TApi extends Api>(
+	model: Model<TApi>,
+	context: TranscriptContext,
+	allowedToolCallProviders: ReadonlySet<string>,
+	options?: ConvertResponsesMessagesOptions & { effortBaseline?: "initial" },
+) {
 	const normalizedContext = resolveTranscript(context, options?.supportsMidConvoSystemMessages);
 	const messages: ResponseInput = [];
 
@@ -277,7 +303,17 @@ export function convertResponsesMessages<TApi extends Api>(
 			tools: convertResponsesTools(tools, { ...options?.toolOptions, toolSearchResult: true }),
 		} satisfies ResponseToolSearchOutputItemParam);
 	};
+	let requestEffortBaseline: string | undefined;
+	let previousEffort: string | undefined;
 	const pushConfigurationUpdate = (effort: string): void => {
+		if (options?.effortBaseline === "initial") {
+			if (previousEffort === effort) return;
+			previousEffort = effort;
+			if (requestEffortBaseline === undefined) {
+				requestEffortBaseline = effort;
+				return;
+			}
+		}
 		messages.push({
 			type: "configuration_update",
 			reasoning: { effort: effort as NonNullable<ResponseConfigurationUpdateItemParam.Reasoning["effort"]> },
@@ -386,25 +422,34 @@ export function convertResponsesMessages<TApi extends Api>(
 						itemId = undefined;
 					}
 
+					// OpenAI returns tool calls with status "completed", so replay them the same way. Over the Codex WebSocket,
+					// OpenAI keeps the previous response's items itself, and later reasoning is generated after calls that have
+					// the status. After 5 idle minutes the connection closes and pi sends the whole history again. If a call
+					// lacks the status there, the history no longer matches, and from GPT-6.2 on OpenAI drops the reasoning
+					// that follows it (`prefix_mismatch`, #12367).
+					// Always "completed": a stream that ends with an unfinished tool call fails, and failed messages are not replayed.
+					// `status` is spread in because the SDK declares it only on returned custom tool calls; the API accepts it on input too.
+					const replayedCall = {
+						id: itemId,
+						call_id: callId,
+						name: toolCall.name,
+						status: "completed" as const,
+						...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
+					};
 					if (customInputProperty !== undefined) {
 						output.push({
 							type: "custom_tool_call",
-							id: itemId,
-							call_id: callId,
-							name: toolCall.name,
+							...replayedCall,
 							input: sanitizeSurrogates(
 								getGrammarToolInput(toolCall.name, toolCall.arguments, customInputProperty),
 							),
-							...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
-						} satisfies ResponseOutputItem);
+						});
 					} else {
 						output.push({
 							type: "function_call",
-							id: itemId,
-							call_id: callId,
+							...replayedCall,
 							name: replayedFunctionName(toolCall.name),
 							arguments: JSON.stringify(toolCall.arguments),
-							...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
 						});
 					}
 				}
@@ -440,7 +485,7 @@ export function convertResponsesMessages<TApi extends Api>(
 	}
 	if (options?.configurationUpdateEffort !== undefined) pushConfigurationUpdate(options.configurationUpdateEffort);
 
-	return messages;
+	return { input: messages, requestTools: transcriptTools.requestTools, requestEffortBaseline };
 }
 
 // =============================================================================

@@ -31,7 +31,7 @@ function createContext(
 			session: {
 				settingsManager: {
 					getShowTerminalProgress: () => false,
-					getShowCacheMissNotices: () => showCacheMissNotices,
+					getNotices: () => ({ cacheMisses: showCacheMissNotices, cacheWarming: showCacheMissNotices }),
 				},
 				sessionManager: {
 					getHistoryMetrics: () => (persisted ? { session_active_entries: getActiveEntries() } : undefined),

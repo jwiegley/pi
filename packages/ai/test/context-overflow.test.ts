@@ -280,8 +280,8 @@ describe("Context overflow error handling", () => {
 	// =============================================================================
 
 	describe.skipIf(!process.env.GROQ_API_KEY)("Groq", () => {
-		it("qwen/qwen3.8-27b - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("groq", "qwen/qwen3.8-27b");
+		it("gpt-oss-120b - should detect overflow via isContextOverflow", async () => {
+			const model = getModel("groq", "openai/gpt-oss-120b");
 			const result = await testContextOverflow(model, process.env.GROQ_API_KEY!);
 			logResult(result);
 

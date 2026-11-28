@@ -43,6 +43,24 @@ describe("AuthStorage", () => {
 		expect(await storage.read("anthropic")).toEqual({ type: "api_key", key: "command-key" });
 	});
 
+	// Upstream #12164 intersects the fork's literal-write policy: saving must not rerun the command.
+	test("stores a previously command-backed key literally when saved through the credential API", async () => {
+		const name = `PI_TEST_AUTH_STORAGE_COMMAND_${Date.now()}`;
+		const credential = { type: "api_key" as const, key: `!printenv ${name}` };
+		writeAuthJson({ anthropic: credential });
+		const storage = AuthStorage.create(authJsonPath);
+		try {
+			expect(await storage.read("anthropic")).toEqual({ type: "api_key", key: undefined });
+			process.env[name] = "command-key";
+			expect(await storage.read("anthropic")).toEqual({ type: "api_key", key: undefined });
+
+			await storage.modify("anthropic", async () => credential);
+			expect(await storage.read("anthropic")).toEqual({ type: "api_key", key: credential.key });
+		} finally {
+			delete process.env[name];
+		}
+	});
+
 	test("returns OAuth credentials unchanged", async () => {
 		const credential = {
 			type: "oauth" as const,
@@ -116,8 +134,8 @@ describe("AuthStorage", () => {
 	test("keeps a coalesced reload alive while another credential reader is waiting", async () => {
 		writeAuthJson({ anthropic: { type: "api_key", key: "old" } });
 		const storage = AuthStorage.create(authJsonPath);
-		// Force a size change so coarse filesystem timestamps cannot hide the external update.
-		writeAuthJson({ anthropic: { type: "api_key", key: "new-value" } });
+		// Change the file size so the revision changes even with coarse file timestamps (#12190).
+		writeAuthJson({ anthropic: { type: "api_key", key: "newer" } });
 		let grantLock: (() => void) | undefined;
 		const lockGranted = new Promise<void>((resolve) => {
 			grantLock = resolve;
@@ -135,7 +153,7 @@ describe("AuthStorage", () => {
 		firstController.abort();
 		await expect(first).rejects.toMatchObject({ name: "AbortError" });
 		grantLock?.();
-		await expect(second).resolves.toEqual({ type: "api_key", key: "new-value" });
+		await expect(second).resolves.toEqual({ type: "api_key", key: "newer" });
 		expect(lockSpy).toHaveBeenCalledTimes(1);
 		expect(release).toHaveBeenCalledTimes(1);
 	});

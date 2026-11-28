@@ -47,7 +47,7 @@ This table covers providers with a single primary API-key variable. Providers th
 | ZAI Coding Plan (China) | `ZAI_CODING_CN_API_KEY` |
 | OpenCode Zen and Go | `OPENCODE_API_KEY` |
 | Radius | `RADIUS_API_KEY` |
-| TypeSafe ([classifier models](models.md#use-classifier-models)) | `TYPESAFE_API_KEY` |
+| TypeSafe ([decision models](models.md#use-decision-models)) | `TYPESAFE_API_KEY` |
 | Hugging Face | `HF_TOKEN` |
 | Fireworks | `FIREWORKS_API_KEY` |
 | Together AI | `TOGETHER_API_KEY` |
@@ -83,7 +83,7 @@ To use a secret manager without writing the resolved key to disk, set a provider
 }
 ```
 
-Pi runs the command when the key is first needed and caches its standard output for the process lifetime. Empty output, a timeout, or a nonzero exit leaves the key unresolved until Pi restarts.
+Pi runs the command when the key is first needed and caches its standard output for the process lifetime. Empty output, a timeout, or a nonzero exit leaves the key unresolved: `/login` shows the provider as `stored key did not resolve`. To retry, for example after signing in to the secret manager, enter the same `!command` again in `/login`, or restart Pi.
 
 A stored `key` can also name environment variables as `$NAME` or `${NAME}`; write `$$` for a literal `$` and `$!` for a literal `!`. `/login` and `pi auth login --api-key` store the key you enter escaped this way, so it is never expanded or run as a command.
 
@@ -162,7 +162,7 @@ Radius authentication uses its gateway catalog and caches refreshed model metada
 
 Authenticate with `/login openrouter` or `OPENROUTER_API_KEY`.
 
-With a key, Pi lists only the OpenRouter chat models that key may use, with the key's context size, max output, and prices. These come from OpenRouter's `/models/user` endpoint and reflect guardrails and provider restrictions set in OpenRouter. Image and classifier models are not filtered.
+With a key, Pi lists only the OpenRouter chat models that key may use, with the key's context size, max output, and prices. These come from OpenRouter's `/models/user` endpoint and reflect guardrails and provider restrictions set in OpenRouter. Image and decision models are not filtered.
 
 Pi refreshes the list when `/model` opens, after `/login` or `pi auth login`, on `pi update --models`, and in the background when RPC mode starts. Interactive mode does not refresh it at startup. The last list is saved and used offline, in `pi -p`, and until a refresh completes. After switching keys outside `/login`, the previous key's list stays until the next refresh.
 

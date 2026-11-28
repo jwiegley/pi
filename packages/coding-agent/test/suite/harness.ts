@@ -121,6 +121,7 @@ export interface HarnessOptions {
 	resourceLoader?: ResourceLoader;
 	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
+	authStorage?: AuthStorage;
 	modelsJson?: Record<string, unknown>;
 	/** Session to continue, for example to test a resume. Default: a new in-memory session. */
 	sessionManager?: SessionManager;
@@ -167,7 +168,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		(options.persistSession ? SessionManager.create(tempDir, tempDir) : SessionManager.inMemory());
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
-	const authStorage = AuthStorage.inMemory();
+	const authStorage = options.authStorage ?? AuthStorage.inMemory();
 	if (withConfiguredAuth) {
 		await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
 	}
